@@ -313,6 +313,25 @@ async def test_slash_command_suggestions():
 
 
 @pytest.mark.asyncio
+async def test_thinking_finalizes_to_thought_for():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._dispatch(ThoughtDelta("pondering..."))
+        await pilot.pause()
+        thought = app.query(ThoughtMessage).first()
+        assert "thinking" in str(thought.title)
+        assert not thought._finished
+
+        # The visible answer beginning finalizes the thinking lane.
+        await app._dispatch(TextDelta("Here is the answer."))
+        await pilot.pause()
+        assert thought._finished
+        assert "thought for" in str(thought.title)
+
+
+@pytest.mark.asyncio
 async def test_live_token_estimate_then_exact():
     transport = FakeTransport()
     app = PawApp(transport)

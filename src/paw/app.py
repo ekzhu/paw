@@ -220,6 +220,9 @@ class PawApp(App):
 
     async def _dispatch(self, event) -> None:
         if isinstance(event, TextDelta):
+            # The visible answer beginning means thinking is done.
+            if self._thought is not None:
+                self._thought.done()
             if self._assistant is None:
                 self._assistant = AssistantMessage()
                 await self._mount(self._assistant)
@@ -230,7 +233,7 @@ class PawApp(App):
 
         elif isinstance(event, ThoughtDelta):
             if self._thought is None:
-                self._thought = ThoughtMessage()
+                self._thought = ThoughtMessage(live=True)
                 await self._mount(self._thought)
             self._thought.append(event.text)
             # Reasoning counts toward output tokens too.
@@ -238,6 +241,9 @@ class PawApp(App):
             self._refresh_tokens()
 
         elif isinstance(event, ToolCall):
+            # A tool starting also ends the current thinking block.
+            if self._thought is not None:
+                self._thought.done()
             panel = self._tools.get(event.tool_call_id)
             if panel is None:
                 panel = ToolPanel(
@@ -298,6 +304,8 @@ class PawApp(App):
 
         elif isinstance(event, TurnEnded):
             self._busy = False
+            if self._thought is not None:
+                self._thought.done()
             self._assistant = None
             self._thought = None
             self._tools.clear()

@@ -13,6 +13,8 @@ from rich.text import Text
 from textual.content import Content
 from textual.widgets import Collapsible, Static
 
+from ._anim import TICK, pulse, spinner
+
 _STATUS_GLYPH = {
     "pending": ("◌", "#8a8a8a"),
     "in_progress": ("◍", "#6db8ff"),
@@ -39,6 +41,8 @@ class ToolPanel(Collapsible):
         self._params = params
         self._status = "pending"
         self._output: str | None = None
+        self._frame = 0
+        self._timer = None
         self._body = Static(self._render_body())
         super().__init__(
             self._body,
@@ -46,6 +50,19 @@ class ToolPanel(Collapsible):
             collapsed=False,
             classes="tool",
         )
+
+    def on_mount(self) -> None:
+        # Animate the status glyph while the tool is still running.
+        self._timer = self.set_interval(TICK, self._tick)
+
+    def _tick(self) -> None:
+        if self._status in _TERMINAL:
+            if self._timer is not None:
+                self._timer.stop()
+                self._timer = None
+            return
+        self._frame += 1
+        self.title = self._render_title()
 
     def update_call(
         self,
@@ -70,9 +87,12 @@ class ToolPanel(Collapsible):
         self.title = self._render_title()
         self._body.update(self._render_body())
         # Auto-collapse once on the transition to a terminal state; leave the
-        # user free to re-open it afterwards.
+        # user free to re-open it afterwards, and stop the spinner.
         if self._status in _TERMINAL and prev not in _TERMINAL:
             self.collapsed = True
+            if self._timer is not None:
+                self._timer.stop()
+                self._timer = None
 
     @property
     def is_done(self) -> bool:
@@ -102,7 +122,11 @@ class ToolPanel(Collapsible):
         # The glyph + colour already encode status, so we drop the redundant
         # "completed" word and surface the param summary instead — that's what
         # actually tells finished tools apart in the collapsed list.
-        glyph, color = _STATUS_GLYPH.get(self._status, ("◌", "#8a8a8a"))
+        if self._status in _TERMINAL:
+            glyph, color = _STATUS_GLYPH.get(self._status, ("◌", "#8a8a8a"))
+        else:
+            # Running: animated spinner + pulsing colour.
+            glyph, color = spinner(self._frame), pulse(self._frame)
         parts: list[object] = [
             (f"{glyph} ", f"bold {color}"),
             "🔧 ",

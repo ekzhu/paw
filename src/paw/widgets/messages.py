@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
+import time
+
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.widget import Widget
 from textual.widgets import Collapsible, Markdown, Static
+
+from ._anim import TICK, pulse, spinner
 
 
 class UserMessage(Static):
@@ -55,12 +59,25 @@ class ThoughtMessage(Collapsible):
 
     The reasoning streams into the (hidden) body; the user can expand the
     header to read it. Reused for plan summaries via the ``title`` argument.
+
+    When ``live=True`` the header animates (spinner + pulsing colour) and
+    shows the elapsed time while the agent thinks; calling :meth:`done`
+    freezes it to ``💭 thought for Ns``.
     """
 
     def __init__(
-        self, title: str = "💭 thinking", collapsed: bool = True
+        self,
+        title: str = "💭 thinking",
+        collapsed: bool = True,
+        *,
+        live: bool = False,
     ) -> None:
         self._text = ""
+        self._live = live
+        self._start: float | None = None
+        self._timer = None
+        self._frame = 0
+        self._finished = False
         self._body = Static(Text("", style="italic #8a8a8a"))
         super().__init__(
             self._body,
@@ -68,6 +85,36 @@ class ThoughtMessage(Collapsible):
             collapsed=collapsed,
             classes="msg thought",
         )
+
+    def on_mount(self) -> None:
+        if self._live:
+            self._start = time.monotonic()
+            self._timer = self.set_interval(TICK, self._tick)
+            self._tick()
+
+    def _elapsed(self) -> int:
+        if self._start is None:
+            return 0
+        return int(time.monotonic() - self._start)
+
+    def _tick(self) -> None:
+        if self._finished:
+            return
+        self._frame += 1
+        head = Text()
+        head.append("💭 ", style="")
+        head.append(f"thinking {self._elapsed()}s ", style="italic #8a8a8a")
+        head.append(spinner(self._frame), style=f"bold {pulse(self._frame)}")
+        self.title = head
+
+    def done(self) -> None:
+        """Freeze the header to the final elapsed time."""
+        if self._finished or not self._live:
+            return
+        self._finished = True
+        if self._timer is not None:
+            self._timer.stop()
+        self.title = f"💭 thought for {self._elapsed()}s"
 
     def append(self, delta: str) -> None:
         self._text += delta
