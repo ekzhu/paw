@@ -9,6 +9,7 @@ from .messages import (
     AssistantMessage,
     ErrorMessage,
     PushMessageBox,
+    QueuedMessage,
     ThoughtMessage,
     UserMessage,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "PromptInput",
     "ErrorMessage",
     "PushMessageBox",
+    "QueuedMessage",
     "ThoughtMessage",
     "UserMessage",
     "PermissionModal",

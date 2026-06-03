@@ -23,6 +23,20 @@ class UserMessage(Static):
         super().__init__(body, classes="msg user")
 
 
+class QueuedMessage(Static):
+    """A user message waiting its turn while the agent is still working.
+
+    Sent while busy, it sits dimmed in the transcript until the current turn
+    ends (then it's delivered) or the user recalls it with ↑ to edit.
+    """
+
+    def __init__(self, text: str) -> None:
+        body = Text()
+        body.append("⏳ ", style="#8a8a8a")
+        body.append(text, style="#8a8a8a")
+        super().__init__(body, classes="msg queued")
+
+
 class AgentLabel(Static):
     """The ``qwenpaw`` lane label, shown once at the start of a turn.
 

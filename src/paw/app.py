@@ -34,6 +34,7 @@ from .widgets import (
     PermissionModal,
     PromptInput,
     PushMessageBox,
+    QueuedMessage,
     StatusBar,
     ThoughtMessage,
     ToolPanel,
@@ -72,8 +73,11 @@ class PawApp(App):
     """
 
     BINDINGS = [
-        Binding("escape", "interrupt", "Interrupt", show=True),
-        Binding("ctrl+t", "toggle_tools", "Hide/show tools", show=True),
+        Binding("escape", "interrupt", "Cancel/interrupt", show=True),
+        Binding("up", "recall_queued", "Edit queued", show=False),
+        # Kept functional for power users but no longer advertised in the
+        # input bar — the glyph was unfamiliar to most users.
+        Binding("ctrl+t", "toggle_tools", "Hide/show tools", show=False),
         Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
     ]
@@ -96,6 +100,10 @@ class PawApp(App):
         self._tools: dict[str, ToolPanel] = {}
         self._tools_hidden = False
         self._busy = False
+        # Messages typed while the agent is busy wait here (FIFO) and are sent
+        # automatically as each turn ends. Each entry pairs the text with its
+        # dimmed transcript widget so it can be removed when sent or recalled.
+        self._queued: list[tuple[str, QueuedMessage]] = []
         # Running token totals for the session (summed across LLM calls).
         # ``_tok_out`` is the confirmed output total; ``_stream_chars`` counts
         # characters streamed since the last confirmed usage, for a live
@@ -115,7 +123,8 @@ class PawApp(App):
             self._menu,
             placeholder=(
                 "type a message  "
-                "(/ commands · ⏎ send · esc interrupt · ⌃t tools · ⌃c quit)"
+                "(/ commands · ⏎ send/queue · ↑ edit queued · "
+                "esc cancel · ⌃c quit)"
             ),
             suggester=self._suggester,
             id="prompt",
@@ -164,9 +173,25 @@ class PawApp(App):
         event.input.value = ""
         self._menu.display = False
         if self._busy:
-            await self._mount(
-                ErrorMessage("Still working — press esc to interrupt.")
-            )
+            # Queue it; it's delivered automatically when the turn ends. The
+            # user can recall it with ↑ to edit before it's picked up.
+            widget = QueuedMessage(text)
+            await self._mount(widget)
+            self._queued.append((text, widget))
+            return
+        await self._submit(text)
+
+    async def _submit(self, text: str) -> None:
+        """Deliver one user turn (or run ``/new``) now."""
+        # ``/new`` starts a brand-new conversation. Handle it client-side so
+        # the session id (status bar + terminal title) actually changes — the
+        # agent's own ``/new`` only clears context within the same session.
+        if text.split()[0].lower() == "/new":
+            await self._mount(UserMessage(text))
+            await self._start_new_session()
+            # ``/new`` isn't a turn (no TurnEnded), so pull the next queued
+            # message ourselves.
+            await self._drain_queue()
             return
         await self._mount(UserMessage(text))
         # Reset per-turn lane state so a fresh assistant bubble (and a single
@@ -182,11 +207,73 @@ class PawApp(App):
             self._busy = False
             self._status().set(state="ready")
             await self._mount(ErrorMessage(str(exc)))
+            await self._drain_queue()
+
+    async def _drain_queue(self) -> None:
+        """Send the next queued message, if the agent is free to take it."""
+        if self._busy or not self._queued:
+            return
+        text, widget = self._queued.pop(0)
+        widget.remove()
+        await self._submit(text)
+
+    async def _start_new_session(self) -> None:
+        """Open a fresh session and reset all per-session UI state."""
+        try:
+            connected = await self._transport.new_session()
+        except Exception as exc:  # noqa: BLE001
+            await self._mount(
+                ErrorMessage(f"could not start a new session: {exc}")
+            )
+            return
+        # Updates the status bar session id and the terminal title.
+        self._on_connected(connected)
+        # Reset per-turn lane state and the session token totals — they
+        # belonged to the conversation we just left.
+        self._assistant = None
+        self._thought = None
+        self._labeled = False
+        self._tools.clear()
+        self._tok_in = 0
+        self._tok_out = 0
+        self._stream_chars = 0
+        self._status().set(used=0, size=0)
+        self._refresh_tokens()
+        await self._mount(
+            PushMessageBox(
+                f"Started a new session ({str(connected.session_id)[:8]})."
+            )
+        )
 
     # -- actions -------------------------------------------------------------
     async def action_interrupt(self) -> None:
         if self._busy:
+            # Reflect the request immediately; the agent may take a moment to
+            # observe the cancel and end the turn (then state → ready).
+            self._status().set(state="interrupting")
             await self._transport.interrupt()
+            return
+        # Idle: esc cancels the current input draft (and any open menu).
+        prompt = self.query_one("#prompt", Input)
+        if prompt.value:
+            prompt.value = ""
+            self._menu.display = False
+
+    async def action_recall_queued(self) -> None:
+        """Pull the most recently queued message back into the input to edit.
+
+        Only when the menu is closed and the input is empty, so it never
+        clobbers text the user is mid-way through typing.
+        """
+        if self._menu.display or not self._queued:
+            return
+        prompt = self.query_one("#prompt", Input)
+        if prompt.value:
+            return
+        text, widget = self._queued.pop()
+        widget.remove()
+        prompt.value = text
+        prompt.cursor_position = len(text)
 
     def action_toggle_tools(self) -> None:
         """Hide (or reveal) every finished tool panel for a clean transcript.
@@ -358,6 +445,8 @@ class PawApp(App):
             self._stream_chars = 0
             self._refresh_tokens()
             self._status().set(state="ready")
+            # Hand off to the next message the user queued while we worked.
+            await self._drain_queue()
 
     def _on_permission(self, event: PermissionRequest) -> None:
         def _resolve(option_id: str | None) -> None:

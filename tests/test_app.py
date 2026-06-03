@@ -26,6 +26,7 @@ from paw.widgets import (
     AssistantMessage,
     CommandMenu,
     PermissionModal,
+    QueuedMessage,
     ThoughtMessage,
     ToolPanel,
     UserMessage,
@@ -41,11 +42,20 @@ class FakeTransport:
         self.interrupted = False
         self.resolved: list[tuple[str, str | None]] = []
         self.closed = False
+        self.new_sessions = 0
         self._permission_mode = "none"
 
     async def start(self) -> Connected:
         return Connected(
             session_id="sess-abc", agent="default", model="qwen-max"
+        )
+
+    async def new_session(self) -> Connected:
+        self.new_sessions += 1
+        return Connected(
+            session_id=f"sess-new{self.new_sessions}",
+            agent="default",
+            model="qwen-max",
         )
 
     async def send(self, text: str) -> None:
@@ -452,3 +462,120 @@ async def test_interrupt_action():
         app._busy = True
         await app.action_interrupt()
         assert transport.interrupted
+        # The status bar reflects the request immediately.
+        assert "interrupting" in app.query_one("StatusBar").summary
+
+
+@pytest.mark.asyncio
+async def test_escape_keypress_interrupts_when_busy():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._busy = True
+        app.query_one("#prompt").focus()
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert transport.interrupted
+
+
+@pytest.mark.asyncio
+async def test_escape_clears_input_when_idle():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        prompt = app.query_one("#prompt")
+        prompt.value = "half-typed message"
+        prompt.focus()
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert prompt.value == ""
+        assert not transport.interrupted  # idle esc never interrupts
+
+
+@pytest.mark.asyncio
+async def test_messages_queue_while_busy_and_drain_on_turn_end():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Pretend the agent is mid-turn.
+        app._busy = True
+        prompt = app.query_one("#prompt")
+
+        prompt.value = "first queued"
+        await pilot.press("enter")
+        prompt.value = "second queued"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        # Both wait in the queue (dimmed), nothing sent yet.
+        assert [t for t, _ in app._queued] == ["first queued", "second queued"]
+        assert len(list(app.query(QueuedMessage))) == 2
+        assert transport.sent == []
+
+        # The turn ends → the first queued message is delivered.
+        await app._dispatch(TurnEnded())
+        for _ in range(10):
+            await pilot.pause()
+            if not app._busy:
+                break
+        # FakeTransport auto-ends each turn, so the second drains too.
+        for _ in range(10):
+            await pilot.pause()
+            if transport.sent == ["first queued", "second queued"]:
+                break
+        assert transport.sent == ["first queued", "second queued"]
+        assert app._queued == []
+        assert len(list(app.query(QueuedMessage))) == 0
+
+
+@pytest.mark.asyncio
+async def test_up_recalls_queued_message_to_edit():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._busy = True
+        prompt = app.query_one("#prompt")
+
+        prompt.value = "draft to fix"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert len(list(app.query(QueuedMessage))) == 1
+
+        # ↑ pulls the last queued message back into the input for editing.
+        await pilot.press("up")
+        await pilot.pause()
+        assert prompt.value == "draft to fix"
+        assert app._queued == []
+        assert len(list(app.query(QueuedMessage))) == 0
+        assert transport.sent == []
+
+
+@pytest.mark.asyncio
+async def test_new_command_opens_fresh_session():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        bar = app.query_one("StatusBar")
+        assert "sess-abc" in bar.summary
+
+        prompt = app.query_one("#prompt")
+        prompt.value = "/new"
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+            if transport.new_sessions:
+                break
+
+        # A new session was opened and the status bar id changed.
+        assert transport.new_sessions == 1
+        assert "sess-new" in bar.summary
+        assert "sess-abc" not in bar.summary
+        # `/new` is handled client-side, not forwarded to the agent.
+        assert transport.sent == []

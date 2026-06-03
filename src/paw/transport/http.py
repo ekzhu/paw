@@ -97,6 +97,15 @@ class HttpTransport:
             ) from exc
 
         # Create a chat so we have a chat_id for the stop endpoint (optional).
+        await self._create_chat()
+
+        return Connected(
+            session_id=self._session_id, agent=self._agent, model=None
+        )
+
+    async def _create_chat(self) -> None:
+        """Open a chat for the current session id, recording its ``chat_id``
+        (used by the stop endpoint). Non-fatal if the server declines."""
         try:
             resp = await self._client.post(
                 self._url("/api/chats"),
@@ -113,6 +122,22 @@ class HttpTransport:
         except Exception as exc:  # noqa: BLE001
             logger.debug("chat create failed (non-fatal): %s", exc)
 
+    async def new_session(self) -> Connected:
+        if self._client is None:
+            raise RuntimeError("transport not started")
+        # Stop any in-flight turn / approval polling for the old session.
+        if self._turn_task is not None and not self._turn_task.done():
+            self._turn_task.cancel()
+            try:
+                await self._turn_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        self._stop_poll()
+        self._pending.clear()
+        # A fresh session id (and chat) so the server starts anew.
+        self._session_id = f"paw:{uuid.uuid4().hex[:12]}"
+        self._chat_id = None
+        await self._create_chat()
         return Connected(
             session_id=self._session_id, agent=self._agent, model=None
         )

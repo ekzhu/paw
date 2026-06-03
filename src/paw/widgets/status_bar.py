@@ -70,6 +70,7 @@ class StatusBar(Static):
             "connecting": "#ffcf6d",
             "ready": "#6dff9d",
             "thinking": "#6db8ff",
+            "interrupting": "#ffcf6d",
             "error": "#ff6d6d",
         }.get(self._sb_state, "#8a8a8a")
 
