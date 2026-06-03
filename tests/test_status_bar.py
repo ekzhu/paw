@@ -28,3 +28,13 @@ def test_estimate_is_marked_with_tilde():
     bar = StatusBar()
     bar.set(tok_in=1200, tok_out=512, tok_out_approx=True)
     assert "↓~512" in bar.summary
+
+
+def test_input_not_shown_as_zero_during_first_stream():
+    # Before any usage arrives, input is unknown — show only the output
+    # estimate, never "↑0".
+    bar = StatusBar()
+    bar.set(tok_in=0, tok_out=10, tok_out_approx=True)
+    summary = bar.summary
+    assert "↓~10" in summary
+    assert "↑" not in summary

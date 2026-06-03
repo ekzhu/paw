@@ -87,12 +87,20 @@ class StatusBar(Static):
                 tokens += f"/{_fmt_count(self._sb_size)}"
             line.append(f"  tokens:{tokens}", style="#8a8a8a")
         if self._sb_tok_in or self._sb_tok_out:
-            approx = "~" if self._sb_tok_out_approx else ""
-            line.append("  tok ", style="#8a8a8a")
-            line.append(f"↑{_fmt_count(self._sb_tok_in)}", style="#7fb7d9")
-            line.append(
-                f" ↓{approx}{_fmt_count(self._sb_tok_out)}", style="#6dff9d"
-            )
+            line.append("  tok", style="#8a8a8a")
+            # Show input only once it's known (it can't be estimated live),
+            # so it never flashes ``↑0`` while the first reply streams; the
+            # confirmed total then carries forward across later turns.
+            if self._sb_tok_in:
+                line.append(
+                    f" ↑{_fmt_count(self._sb_tok_in)}", style="#7fb7d9"
+                )
+            if self._sb_tok_out:
+                approx = "~" if self._sb_tok_out_approx else ""
+                line.append(
+                    f" ↓{approx}{_fmt_count(self._sb_tok_out)}",
+                    style="#6dff9d",
+                )
         line.append("   ", style="")
         line.append(f"⏺ {self._sb_state}", style=f"bold {state_color}")
         return line
