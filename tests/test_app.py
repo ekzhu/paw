@@ -11,6 +11,7 @@ from paw.app import PawApp
 from paw.events import (
     AvailableCommands,
     Connected,
+    FileLink,
     PermissionOption,
     PermissionRequest,
     SessionTitle,
@@ -25,6 +26,7 @@ from paw.widgets import (
     AgentLabel,
     AssistantMessage,
     CommandMenu,
+    FileLinkBox,
     PermissionModal,
     QueuedMessage,
     ThoughtMessage,
@@ -494,6 +496,34 @@ async def test_escape_clears_input_when_idle():
         await pilot.pause()
         assert prompt.value == ""
         assert not transport.interrupted  # idle esc never interrupts
+
+
+@pytest.mark.asyncio
+async def test_file_link_mounts_clickable_box_once():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        link = FileLink(uri="file:///tmp/report.pdf", name="report.pdf")
+        event = ToolCall(
+            "t1",
+            "send_file_to_user",
+            kind="other",
+            status="completed",
+            output="File sent successfully.",
+            links=(link,),
+        )
+        await app._dispatch(event)
+        await pilot.pause()
+
+        boxes = list(app.query(FileLinkBox))
+        assert len(boxes) == 1
+        assert boxes[0]._uri == "file:///tmp/report.pdf"
+
+        # A repeated update for the same tool call must not duplicate the link.
+        await app._dispatch(event)
+        await pilot.pause()
+        assert len(list(app.query(FileLinkBox))) == 1
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,7 @@ from typing import Any
 
 from .events import (
     AvailableCommands,
+    FileLink,
     PlanEntry,
     PlanUpdate,
     SessionTitle,
@@ -31,6 +32,9 @@ from .events import (
     TuiEvent,
     Usage,
 )
+
+# Tool-content block types that carry a file/resource URI worth linking.
+_LINK_BLOCK_TYPES = ("resource_link", "image", "audio", "resource")
 
 # ``_meta`` key QwenPaw sets on an ``agent_message_chunk`` to mark it as an
 # error; mirrors the ACP server's ``ACP_ERROR_META_KEY``.
@@ -63,6 +67,46 @@ def _tool_output_text(content: Any) -> str:
         if text:
             parts.append(text)
     return "\n".join(parts)
+
+
+def _attr(obj: Any, key: str) -> Any:
+    """Read ``key`` from a dict or an attribute-style object."""
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
+def _tool_links(content: Any) -> tuple[FileLink, ...]:
+    """Pull file/resource links out of a tool-call ``content`` list.
+
+    Recognises ACP ``resource_link`` blocks (and image/audio/resource blocks
+    that carry a ``uri``), e.g. the link QwenPaw emits for
+    ``send_file_to_user``.
+    """
+    if not content:
+        return ()
+    links: list[FileLink] = []
+    for item in content:
+        inner = _attr(item, "content")
+        if inner is None:
+            continue
+        if _attr(inner, "type") not in _LINK_BLOCK_TYPES:
+            continue
+        uri = _attr(inner, "uri")
+        if not uri:
+            continue
+        links.append(
+            FileLink(
+                uri=str(uri),
+                name=str(_attr(inner, "name") or ""),
+                mime_type=(
+                    str(_attr(inner, "mime_type"))
+                    if _attr(inner, "mime_type")
+                    else None
+                ),
+            )
+        )
+    return tuple(links)
 
 
 def _tool_input_text(raw_input: Any) -> str:
@@ -140,6 +184,7 @@ def normalize_update(update: Any) -> list[TuiEvent]:
                 or None,
                 params=_tool_input_text(getattr(update, "raw_input", None))
                 or None,
+                links=_tool_links(getattr(update, "content", None)),
             )
         ]
 

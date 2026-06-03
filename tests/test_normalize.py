@@ -17,6 +17,7 @@ from acp.schema import (
     AvailableCommand,
     AvailableCommandsUpdate,
     PlanEntry,
+    ResourceContentBlock,
     UsageUpdate,
 )
 
@@ -104,6 +105,46 @@ def test_tool_call_start_and_update():
     assert ev.tool_call_id == "t1"
     assert ev.status == "completed"
     assert ev.output == "3 hits"
+
+
+def test_tool_call_extracts_resource_link():
+    # send_file_to_user → a text block + a resource_link content block.
+    [ev] = normalize_update(
+        update_tool_call(
+            "t9",
+            status="completed",
+            content=[
+                tool_content(text_block("File sent successfully.")),
+                tool_content(
+                    ResourceContentBlock(
+                        type="resource_link",
+                        uri="file:///tmp/report.pdf",
+                        name="report.pdf",
+                        mime_type="application/pdf",
+                    )
+                ),
+            ],
+        )
+    )
+    assert ev.output == "File sent successfully."
+    assert ev.links == (
+        E.FileLink(
+            uri="file:///tmp/report.pdf",
+            name="report.pdf",
+            mime_type="application/pdf",
+        ),
+    )
+
+
+def test_tool_call_without_links_has_empty_tuple():
+    [ev] = normalize_update(
+        update_tool_call(
+            "t10",
+            status="completed",
+            content=[tool_content(text_block("plain output"))],
+        )
+    )
+    assert ev.links == ()
 
 
 def test_tool_call_renders_raw_input_params():

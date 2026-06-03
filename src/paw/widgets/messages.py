@@ -148,6 +148,34 @@ class ThoughtMessage(Collapsible):
         self._body.update(Text(self._text, style="italic #8a8a8a"))
 
 
+class FileLinkBox(Static):
+    """A file the agent sent (e.g. via ``send_file_to_user``).
+
+    Rendered as a distinct, always-visible transcript line (the originating
+    tool panel auto-collapses) and clickable: a click opens the file with the
+    OS handler via ``App.open_url``.
+    """
+
+    DEFAULT_CSS = """
+    FileLinkBox { height: auto; }
+    FileLinkBox:hover { background: #23233a; }
+    """
+
+    def __init__(self, name: str, uri: str) -> None:
+        self._uri = uri
+        body = Text()
+        body.append("📎 ", style="bold #6db8ff")
+        body.append(name or uri, style="underline #6db8ff")
+        body.append("  (click to open)", style="#5a5a5a")
+        super().__init__(body, classes="msg file")
+
+    def on_click(self) -> None:
+        try:
+            self.app.open_url(self._uri)
+        except Exception:  # noqa: BLE001 - opening is best-effort
+            pass
+
+
 class PushMessageBox(Static):
     """A server-initiated proactive message."""
 

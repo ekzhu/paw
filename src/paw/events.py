@@ -42,6 +42,19 @@ class ThoughtDelta:
 
 
 @dataclass(frozen=True)
+class FileLink:
+    """A file the agent surfaced (e.g. via ``send_file_to_user``).
+
+    Carried on a :class:`ToolCall` as an ACP ``resource_link`` content block;
+    the UI renders it as a clickable link that opens the file.
+    """
+
+    uri: str
+    name: str = ""
+    mime_type: str | None = None
+
+
+@dataclass(frozen=True)
 class ToolCall:
     """Start or update of a tool call (keyed by ``tool_call_id``)."""
 
@@ -51,6 +64,7 @@ class ToolCall:
     status: str | None = None  # pending | in_progress | completed | failed
     output: str | None = None
     params: str | None = None  # raw input parameters, rendered for display
+    links: tuple[FileLink, ...] = ()  # file/resource links in the result
 
 
 @dataclass(frozen=True)

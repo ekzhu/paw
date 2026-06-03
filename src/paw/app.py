@@ -31,6 +31,7 @@ from .widgets import (
     CommandMenu,
     CommandSuggester,
     ErrorMessage,
+    FileLinkBox,
     PermissionModal,
     PromptInput,
     PushMessageBox,
@@ -104,6 +105,9 @@ class PawApp(App):
         # automatically as each turn ends. Each entry pairs the text with its
         # dimmed transcript widget so it can be removed when sent or recalled.
         self._queued: list[tuple[str, QueuedMessage]] = []
+        # (tool_call_id, uri) pairs already surfaced as a FileLinkBox, so a
+        # repeated tool update doesn't mount the same link twice.
+        self._file_links_seen: set[tuple[str, str]] = set()
         # Running token totals for the session (summed across LLM calls).
         # ``_tok_out`` is the confirmed output total; ``_stream_chars`` counts
         # characters streamed since the last confirmed usage, for a live
@@ -234,6 +238,7 @@ class PawApp(App):
         self._thought = None
         self._labeled = False
         self._tools.clear()
+        self._file_links_seen.clear()
         self._tok_in = 0
         self._tok_out = 0
         self._stream_chars = 0
@@ -393,6 +398,14 @@ class PawApp(App):
             # complete after it was switched on.
             if self._tools_hidden and panel.is_done:
                 panel.add_class("hidden")
+            # Surface any files the tool returned (e.g. send_file_to_user) as
+            # their own clickable transcript line, since the panel collapses.
+            for link in event.links:
+                key = (event.tool_call_id, link.uri)
+                if key in self._file_links_seen:
+                    continue
+                self._file_links_seen.add(key)
+                await self._mount(FileLinkBox(link.name, link.uri))
 
         elif isinstance(event, SessionTitle):
             self._set_terminal_title(f"QwenPaw {event.title}")
