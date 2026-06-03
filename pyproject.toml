@@ -1,0 +1,51 @@
+[project]
+name = "paw"
+dynamic = ["version"]
+description = "A terminal chat UI for QwenPaw — drive a local, bundled, or remote QwenPaw agent over ACP."
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "ekzhu" }]
+keywords = ["qwenpaw", "acp", "tui", "textual", "agent", "cli"]
+dependencies = [
+    # Streaming-markdown terminal UI (v4+ adds the streaming Markdown widget).
+    "textual>=4.0",
+    # ACP client used to drive `qwenpaw acp` over stdio.
+    "agent-client-protocol>=0.9.0",
+    "click>=8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ekzhu/paw"
+Repository = "https://github.com/ekzhu/paw"
+
+[project.scripts]
+paw = "paw.cli:main"
+
+[project.optional-dependencies]
+# `pip install paw[bundled]` ships QwenPaw in the same environment, so paw can
+# spawn it directly (`python -m qwenpaw acp`) with no separate install.
+bundled = ["qwenpaw>=1.1.10"]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "black>=23.0",
+    "flake8>=6.0",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "paw.__version__.__version__" }
+
+[tool.setuptools]
+packages = { find = { where = ["src"] } }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 79
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
