@@ -128,3 +128,17 @@ async def test_interrupt_cancels_turn():
         await transport.close()
 
     assert isinstance(events[-1], TurnEnded)
+
+
+def test_session_agent_reads_meta():
+    from types import SimpleNamespace
+
+    from paw.transport.acp import _session_agent
+
+    # Agent id reported via the session response _meta.
+    sess = SimpleNamespace(field_meta={"qwenpaw.agent": "writer"})
+    assert _session_agent(sess) == "writer"
+
+    # Missing / unrelated meta → None (caller falls back to the requested id).
+    assert _session_agent(SimpleNamespace(field_meta={"other": 1})) is None
+    assert _session_agent(SimpleNamespace(field_meta=None)) is None

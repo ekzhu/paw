@@ -264,7 +264,9 @@ class AcpTransport:
         self._session_id = new_session.session_id
         return Connected(
             session_id=self._session_id,
-            agent=self._agent,
+            # Prefer the agent the server actually resolved (via _meta) over
+            # the one we requested, so the UI shows the real agent.
+            agent=_session_agent(new_session) or self._agent,
             model=_current_model(new_session),
         )
 
@@ -371,6 +373,21 @@ class AcpTransport:
                 pass
             self._stderr_fd = None
         await self._queue.put(_CLOSED)
+
+
+# ``_meta`` key QwenPaw sets on the session response with the resolved agent
+# id; mirrors the ACP server's ``ACP_AGENT_META_KEY``.
+_AGENT_META_KEY = "qwenpaw.agent"
+
+
+def _session_agent(new_session: Any) -> str | None:
+    """The resolved agent id the server reported via ``_meta``, if any."""
+    meta = getattr(new_session, "field_meta", None)
+    if isinstance(meta, dict):
+        agent = meta.get(_AGENT_META_KEY)
+        if agent:
+            return str(agent)
+    return None
 
 
 def _current_model(new_session: Any) -> str | None:

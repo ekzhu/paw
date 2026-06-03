@@ -1,4 +1,4 @@
-# paw
+# QwenPaw-TUI
 
 A terminal chat UI for [QwenPaw](https://github.com/agentscope-ai/QwenPaw).
 
