@@ -14,17 +14,25 @@ the ``acp.schema`` types verified against ``agent-client-protocol`` 0.9.x:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .events import (
+    AvailableCommands,
     PlanEntry,
     PlanUpdate,
+    SlashCommand,
     TextDelta,
     ThoughtDelta,
     ToolCall,
+    TransportError,
     TuiEvent,
     Usage,
 )
+
+# ``_meta`` key QwenPaw sets on an ``agent_message_chunk`` to mark it as an
+# error; mirrors the ACP server's ``ACP_ERROR_META_KEY``.
+_ERROR_META_KEY = "qwenpaw.error"
 
 
 def _block_text(content: Any) -> str:
@@ -55,6 +63,30 @@ def _tool_output_text(content: Any) -> str:
     return "\n".join(parts)
 
 
+def _tool_input_text(raw_input: Any) -> str:
+    """Render raw tool input parameters into compact, readable display text.
+
+    ``raw_input`` is whatever the agent sent (usually a dict like
+    ``{"command": "ls -la"}``). One ``key: value`` line per parameter so the
+    actual command/path/etc. is visible in the panel.
+    """
+    if raw_input is None:
+        return ""
+    if isinstance(raw_input, str):
+        return raw_input.strip()
+    if isinstance(raw_input, dict):
+        lines: list[str] = []
+        for key, value in raw_input.items():
+            text = (
+                value
+                if isinstance(value, str)
+                else json.dumps(value, ensure_ascii=False)
+            )
+            lines.append(f"{key}: {text}")
+        return "\n".join(lines)
+    return str(raw_input)
+
+
 def normalize_update(update: Any) -> list[TuiEvent]:
     """Convert one ACP ``session_update`` payload into zero or more events.
 
@@ -65,7 +97,15 @@ def normalize_update(update: Any) -> list[TuiEvent]:
 
     if kind == "agent_message_chunk":
         text = _block_text(getattr(update, "content", None))
-        return [TextDelta(text)] if text else []
+        if not text:
+            return []
+        # QwenPaw tags failed turns via ``_meta`` so we can render them as
+        # an error instead of a normal assistant reply (see the ACP server's
+        # ``ACP_ERROR_META_KEY``). Other agents omit it → plain text.
+        meta = getattr(update, "field_meta", None)
+        if isinstance(meta, dict) and meta.get(_ERROR_META_KEY):
+            return [TransportError(text)]
+        return [TextDelta(text)]
 
     if kind == "agent_thought_chunk":
         text = _block_text(getattr(update, "content", None))
@@ -75,10 +115,16 @@ def normalize_update(update: Any) -> list[TuiEvent]:
         return [
             ToolCall(
                 tool_call_id=getattr(update, "tool_call_id", ""),
-                title=getattr(update, "title", None) or "tool",
+                # Keep an absent title empty rather than coercing to "tool":
+                # the agent only sends the real name on the *start* event, so a
+                # placeholder here would clobber it on the completion update
+                # (which carries title=None). The widget fills the fallback.
+                title=getattr(update, "title", None) or "",
                 kind=getattr(update, "kind", None),
                 status=getattr(update, "status", None),
                 output=_tool_output_text(getattr(update, "content", None))
+                or None,
+                params=_tool_input_text(getattr(update, "raw_input", None))
                 or None,
             )
         ]
@@ -102,6 +148,17 @@ def normalize_update(update: Any) -> list[TuiEvent]:
             )
         ]
 
-    # current_mode / available_commands / config_option / session_info /
-    # user_message_chunk: not surfaced in the chat transcript (yet).
+    if kind == "available_commands_update":
+        commands = [
+            SlashCommand(
+                name=name,
+                description=getattr(c, "description", "") or "",
+            )
+            for c in (getattr(update, "available_commands", None) or [])
+            if (name := getattr(c, "name", "") or "")
+        ]
+        return [AvailableCommands(commands=commands)]
+
+    # current_mode / config_option / session_info / user_message_chunk:
+    # not surfaced in the chat transcript (yet).
     return []

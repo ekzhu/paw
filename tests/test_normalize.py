@@ -11,7 +11,14 @@ from acp import (
     update_agent_thought,
     update_tool_call,
 )
-from acp.schema import AgentPlanUpdate, PlanEntry, UsageUpdate
+from acp.schema import (
+    AgentMessageChunk,
+    AgentPlanUpdate,
+    AvailableCommand,
+    AvailableCommandsUpdate,
+    PlanEntry,
+    UsageUpdate,
+)
 
 from paw import events as E
 from paw.normalize import normalize_update
@@ -24,6 +31,24 @@ def test_message_chunk_is_text_delta():
 
 def test_empty_message_chunk_is_dropped():
     assert normalize_update(update_agent_message(text_block(""))) == []
+
+
+def test_message_chunk_with_error_meta_is_transport_error():
+    chunk = AgentMessageChunk(
+        sessionUpdate="agent_message_chunk",
+        content=text_block("Error: bad key"),
+        field_meta={"qwenpaw.error": True},
+    )
+    assert normalize_update(chunk) == [E.TransportError("Error: bad key")]
+
+
+def test_message_chunk_with_unrelated_meta_is_text():
+    chunk = AgentMessageChunk(
+        sessionUpdate="agent_message_chunk",
+        content=text_block("hello"),
+        field_meta={"usage": 42},
+    )
+    assert normalize_update(chunk) == [E.TextDelta("hello")]
 
 
 def test_thought_chunk():
@@ -58,6 +83,30 @@ def test_tool_call_start_and_update():
     assert ev.output == "3 hits"
 
 
+def test_tool_call_renders_raw_input_params():
+    [ev] = normalize_update(
+        start_tool_call(
+            "t2",
+            "execute_shell_command",
+            kind="execute",
+            status="in_progress",
+            raw_input={"command": "ls -la /tmp"},
+        )
+    )
+    assert ev.params == "command: ls -la /tmp"
+
+    # Multi-key input renders one ``key: value`` line each; non-string
+    # values are JSON-encoded.
+    [multi] = normalize_update(
+        start_tool_call(
+            "t3",
+            "grep",
+            raw_input={"pattern": "TODO", "max": 5},
+        )
+    )
+    assert multi.params == "pattern: TODO\nmax: 5"
+
+
 def test_plan_update():
     upd = AgentPlanUpdate(
         session_update="plan",
@@ -79,6 +128,25 @@ def test_usage_update():
         UsageUpdate(session_update="usage_update", used=1200, size=8000)
     )
     assert out == [E.Usage(used=1200, size=8000)]
+
+
+def test_available_commands_update():
+    upd = AvailableCommandsUpdate(
+        session_update="available_commands_update",
+        available_commands=[
+            AvailableCommand(name="model", description="switch model"),
+            AvailableCommand(name="agent", description=""),
+        ],
+    )
+    out = normalize_update(upd)
+    assert out == [
+        E.AvailableCommands(
+            commands=[
+                E.SlashCommand(name="model", description="switch model"),
+                E.SlashCommand(name="agent", description=""),
+            ]
+        )
+    ]
 
 
 def test_unknown_update_is_empty():

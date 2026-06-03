@@ -43,6 +43,7 @@ class ToolCall:
     kind: str | None = None
     status: str | None = None  # pending | in_progress | completed | failed
     output: str | None = None
+    params: str | None = None  # raw input parameters, rendered for display
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,21 @@ class PermissionRequest:
 
 
 @dataclass(frozen=True)
+class SlashCommand:
+    """One agent slash command, used to drive input auto-suggestions."""
+
+    name: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class AvailableCommands:
+    """The set of slash commands the agent currently advertises."""
+
+    commands: list[SlashCommand] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class PushMessage:
     """A server-initiated proactive message (ACP ext / SSE push-message)."""
 
@@ -114,6 +130,7 @@ TuiEvent = (
     | PlanUpdate
     | Usage
     | PermissionRequest
+    | AvailableCommands
     | PushMessage
     | TurnEnded
     | TransportError

@@ -9,16 +9,21 @@ import pytest
 
 from paw.app import PawApp
 from paw.events import (
+    AvailableCommands,
     Connected,
     PermissionOption,
     PermissionRequest,
+    SlashCommand,
     TextDelta,
+    ThoughtDelta,
     ToolCall,
     TurnEnded,
 )
 from paw.widgets import (
     AssistantMessage,
+    CommandMenu,
     PermissionModal,
+    ThoughtMessage,
     ToolPanel,
     UserMessage,
 )
@@ -121,6 +126,121 @@ async def test_basic_turn_renders():
 
 
 @pytest.mark.asyncio
+async def test_running_tool_expanded_then_collapsed_when_done():
+    """A tool stays open while running, then auto-collapses on completion."""
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        await app._dispatch(
+            ToolCall(
+                "t1",
+                "execute_shell_command",
+                kind="execute",
+                status="in_progress",
+                params="command: ls -la",
+            )
+        )
+        await pilot.pause()
+        panel = app.query(ToolPanel).first()
+        assert panel.collapsed is False  # running → expanded
+
+        await app._dispatch(
+            ToolCall(
+                "t1",
+                "execute_shell_command",
+                kind="execute",
+                status="completed",
+                output="total 0",
+            )
+        )
+        await pilot.pause()
+        assert panel.collapsed is True  # done → collapsed, re-openable
+
+
+@pytest.mark.asyncio
+async def test_tool_name_persists_after_completion_update():
+    """The agent only sends the name on the start event; the completion
+    update (title="") must not overwrite it back to a placeholder."""
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # start: real name; completion: no title, just status + output
+        await app._dispatch(
+            ToolCall("t1", "execute_shell_command", status="in_progress")
+        )
+        await app._dispatch(
+            ToolCall("t1", "", status="completed", output="done")
+        )
+        await pilot.pause()
+        panel = app.query(ToolPanel).first()
+        assert "execute_shell_command" in panel.title.plain
+
+
+@pytest.mark.asyncio
+async def test_finished_tool_header_is_informative():
+    """A completed tool with a generic title still shows kind + params."""
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._dispatch(
+            ToolCall(
+                "t1",
+                "tool",
+                kind="execute",
+                status="completed",
+                params="command: ls -la /tmp\nshell: zsh",
+                output="x",
+            )
+        )
+        await pilot.pause()
+        panel = app.query(ToolPanel).first()
+        title = panel.title.plain
+        assert "execute" in title  # falls back to kind, not bare "tool"
+        assert "ls -la /tmp" in title  # primary param surfaced
+        assert "completed" not in title  # redundant status word dropped
+
+
+@pytest.mark.asyncio
+async def test_toggle_hides_finished_tools_only():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._dispatch(
+            ToolCall("done", "read_file", kind="read", status="completed")
+        )
+        await app._dispatch(
+            ToolCall("live", "grep", kind="search", status="in_progress")
+        )
+        await pilot.pause()
+        done = app._tools["done"]
+        live = app._tools["live"]
+
+        await pilot.press("ctrl+t")
+        assert done.has_class("hidden")  # finished → hidden
+        assert not live.has_class("hidden")  # running → still visible
+
+        await pilot.press("ctrl+t")
+        assert not done.has_class("hidden")  # toggled back for inspection
+
+
+@pytest.mark.asyncio
+async def test_thinking_collapsed_by_default():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._dispatch(ThoughtDelta("pondering the question"))
+        await pilot.pause()
+        thought = app.query(ThoughtMessage).first()
+        assert thought.collapsed is True
+
+
+@pytest.mark.asyncio
 async def test_permission_modal_resolves():
     transport = FakeTransport()
     app = PawApp(transport)
@@ -143,6 +263,52 @@ async def test_permission_modal_resolves():
                 break
 
         assert transport.resolved == [("r1", "allow")]
+
+
+@pytest.mark.asyncio
+async def test_slash_command_suggestions():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._dispatch(
+            AvailableCommands(
+                commands=[
+                    SlashCommand("model", "switch model"),
+                    SlashCommand("agent", "change agent"),
+                    SlashCommand("clear", "clear session"),
+                ]
+            )
+        )
+        menu = app.query_one(CommandMenu)
+        prompt = app.query_one("#prompt")
+
+        # Plain text → no dropdown.
+        prompt.value = "hi"
+        await pilot.pause()
+        assert not menu.display
+
+        # "/" opens the dropdown with every command.
+        prompt.value = "/"
+        await pilot.pause()
+        assert menu.display
+        assert menu.option_count == 3
+
+        # Inline ghost completion offers the top match.
+        assert await app._suggester.get_suggestion("/mod") == "/model"
+
+        # Typing narrows the list.
+        prompt.value = "/a"
+        await pilot.pause()
+        assert menu.display
+        assert menu.selected == "agent"
+
+        # Tab accepts the highlighted command (note trailing space) and the
+        # menu steps aside instead of submitting.
+        await pilot.press("tab")
+        assert prompt.value == "/agent "
+        assert not menu.display
+        assert transport.sent == []
 
 
 @pytest.mark.asyncio

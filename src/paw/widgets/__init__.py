@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from .command_menu import CommandMenu, CommandSuggester, PromptInput
 from .messages import (
     AssistantMessage,
     ErrorMessage,
@@ -16,6 +17,9 @@ from .tool_panel import ToolPanel
 
 __all__ = [
     "AssistantMessage",
+    "CommandMenu",
+    "CommandSuggester",
+    "PromptInput",
     "ErrorMessage",
     "PushMessageBox",
     "ThoughtMessage",

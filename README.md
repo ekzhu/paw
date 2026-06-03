@@ -54,7 +54,10 @@ paw --agent-cmd "qwenpaw acp"    # drive an explicit ACP command
 ```
 
 Inside the chat: `⏎` send, `esc` interrupt the current turn, `ctrl+c` quit.
-Slash commands are forwarded to the agent.
+Slash commands are forwarded to the agent. Type `/` to open a suggestion
+dropdown of the agent's commands (the agent advertises them over ACP) — `↑`/`↓`
+to pick, `⏎`/`⇥` to insert, `esc` to dismiss; an inline ghost completion of the
+top match is also shown (`→` accepts it).
 
 ## How it finds QwenPaw
 

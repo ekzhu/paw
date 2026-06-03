@@ -6,7 +6,7 @@ from __future__ import annotations
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.widget import Widget
-from textual.widgets import Markdown, Static
+from textual.widgets import Collapsible, Markdown, Static
 
 
 class UserMessage(Static):
@@ -50,17 +50,28 @@ class AssistantMessage(Widget):
         return self._text
 
 
-class ThoughtMessage(Static):
-    """Dimmed agent thinking lane."""
+class ThoughtMessage(Collapsible):
+    """Dimmed agent thinking lane, collapsed by default.
 
-    def __init__(self) -> None:
-        super().__init__("", classes="msg thought")
+    The reasoning streams into the (hidden) body; the user can expand the
+    header to read it. Reused for plan summaries via the ``title`` argument.
+    """
+
+    def __init__(
+        self, title: str = "💭 thinking", collapsed: bool = True
+    ) -> None:
         self._text = ""
+        self._body = Static(Text("", style="italic #8a8a8a"))
+        super().__init__(
+            self._body,
+            title=title,
+            collapsed=collapsed,
+            classes="msg thought",
+        )
 
     def append(self, delta: str) -> None:
         self._text += delta
-        body = Text(self._text, style="italic #8a8a8a")
-        self.update(body)
+        self._body.update(Text(self._text, style="italic #8a8a8a"))
 
 
 class PushMessageBox(Static):
