@@ -16,6 +16,7 @@ from paw.events import (
     SlashCommand,
     TextDelta,
     ThoughtDelta,
+    TokenUsage,
     ToolCall,
     TurnEnded,
 )
@@ -309,6 +310,30 @@ async def test_slash_command_suggestions():
         assert prompt.value == "/agent "
         assert not menu.display
         assert transport.sent == []
+
+
+@pytest.mark.asyncio
+async def test_live_token_estimate_then_exact():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        bar = app.query_one("StatusBar")
+
+        # Stream 40 chars of assistant text → ~10 token estimate, marked "~".
+        await app._dispatch(TextDelta("x" * 40))
+        await pilot.pause()
+        assert "↓~10" in bar.summary
+
+        # Exact usage for the call replaces the estimate (no tilde).
+        await app._dispatch(
+            TokenUsage(input_tokens=1200, output_tokens=7, model="m")
+        )
+        await pilot.pause()
+        assert "↓7" in bar.summary
+        assert "↓~" not in bar.summary
+        assert "↑1.2k" in bar.summary
+        assert app._tok_out == 7 and app._stream_chars == 0
 
 
 @pytest.mark.asyncio

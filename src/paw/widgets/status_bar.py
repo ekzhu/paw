@@ -17,8 +17,22 @@ _FIELDS = (
     "size",
     "tok_in",
     "tok_out",
+    "tok_out_approx",
     "state",
 )
+
+
+def _fmt_count(n: int) -> str:
+    """Compact, readable token count: ``842`` · ``6.4k`` · ``1.5M``.
+
+    Exact below 1,000; abbreviated above so the bar stays tidy when a long
+    session runs into the hundreds of thousands or millions of tokens.
+    """
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}".rstrip("0").rstrip(".") + "k"
+    return f"{n / 1_000_000:.2f}".rstrip("0").rstrip(".") + "M"
 
 
 class StatusBar(Static):
@@ -32,6 +46,7 @@ class StatusBar(Static):
         self._sb_size = 0
         self._sb_tok_in = 0
         self._sb_tok_out = 0
+        self._sb_tok_out_approx = False
         self._sb_state = "connecting"
         # Pass an initial renderable so the first arrange has a valid visual.
         super().__init__(self._compose_line(), classes="statusbar")
@@ -40,7 +55,10 @@ class StatusBar(Static):
         for key, value in kwargs.items():
             if key in _FIELDS and value is not None:
                 setattr(self, f"_sb_{key}", value)
-        self.update(self._compose_line())
+        # Only repaint once mounted; before that the __init__ renderable
+        # stands in (and tests can read ``summary`` without an app).
+        if self.is_mounted:
+            self.update(self._compose_line())
 
     @property
     def summary(self) -> str:
@@ -64,14 +82,17 @@ class StatusBar(Static):
         line.append("  session:", style="#8a8a8a")
         line.append(f"{str(self._sb_session)[:8]}", style="")
         if self._sb_used:
-            tokens = f"{self._sb_used:,}"
+            tokens = _fmt_count(self._sb_used)
             if self._sb_size:
-                tokens += f"/{self._sb_size:,}"
+                tokens += f"/{_fmt_count(self._sb_size)}"
             line.append(f"  tokens:{tokens}", style="#8a8a8a")
         if self._sb_tok_in or self._sb_tok_out:
+            approx = "~" if self._sb_tok_out_approx else ""
             line.append("  tok ", style="#8a8a8a")
-            line.append(f"↑{self._sb_tok_in:,}", style="#7fb7d9")
-            line.append(f" ↓{self._sb_tok_out:,}", style="#6dff9d")
+            line.append(f"↑{_fmt_count(self._sb_tok_in)}", style="#7fb7d9")
+            line.append(
+                f" ↓{approx}{_fmt_count(self._sb_tok_out)}", style="#6dff9d"
+            )
         line.append("   ", style="")
         line.append(f"⏺ {self._sb_state}", style=f"bold {state_color}")
         return line

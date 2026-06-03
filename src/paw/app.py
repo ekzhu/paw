@@ -89,8 +89,12 @@ class PawApp(App):
         self._tools_hidden = False
         self._busy = False
         # Running token totals for the session (summed across LLM calls).
+        # ``_tok_out`` is the confirmed output total; ``_stream_chars`` counts
+        # characters streamed since the last confirmed usage, for a live
+        # (approximate) output-token estimate while a call is in flight.
         self._tok_in = 0
         self._tok_out = 0
+        self._stream_chars = 0
         self._suggester = CommandSuggester()
         self._menu = CommandMenu()
 
@@ -199,6 +203,21 @@ class PawApp(App):
             state="ready",
         )
 
+    # Rough bytes-per-token for the live output estimate (~4 chars/token for
+    # typical text; intentionally crude — it's marked approximate and is
+    # replaced by the exact count when the call's usage arrives).
+    _CHARS_PER_TOKEN = 4
+
+    def _refresh_tokens(self) -> None:
+        """Push token totals to the status bar, including the in-flight
+        estimate for output tokens still streaming."""
+        est = self._stream_chars // self._CHARS_PER_TOKEN
+        self._status().set(
+            tok_in=self._tok_in,
+            tok_out=self._tok_out + est,
+            tok_out_approx=est > 0,
+        )
+
     async def _dispatch(self, event) -> None:
         if isinstance(event, TextDelta):
             if self._assistant is None:
@@ -206,12 +225,17 @@ class PawApp(App):
                 await self._mount(self._assistant)
             await self._assistant.append(event.text)
             self._transcript().scroll_end(animate=False)
+            self._stream_chars += len(event.text)
+            self._refresh_tokens()
 
         elif isinstance(event, ThoughtDelta):
             if self._thought is None:
                 self._thought = ThoughtMessage()
                 await self._mount(self._thought)
             self._thought.append(event.text)
+            # Reasoning counts toward output tokens too.
+            self._stream_chars += len(event.text)
+            self._refresh_tokens()
 
         elif isinstance(event, ToolCall):
             panel = self._tools.get(event.tool_call_id)
@@ -247,12 +271,13 @@ class PawApp(App):
             self._status().set(used=event.used, size=event.size)
 
         elif isinstance(event, TokenUsage):
+            # Exact usage for the just-finished call replaces our estimate.
             self._tok_in += event.input_tokens
             self._tok_out += event.output_tokens
-            fields = {"tok_in": self._tok_in, "tok_out": self._tok_out}
+            self._stream_chars = 0
             if event.model:
-                fields["model"] = event.model
-            self._status().set(**fields)
+                self._status().set(model=event.model)
+            self._refresh_tokens()
 
         elif isinstance(event, PlanUpdate):
             # Render the plan inline as a thought-style summary for now.
@@ -276,6 +301,9 @@ class PawApp(App):
             self._assistant = None
             self._thought = None
             self._tools.clear()
+            # Drop any leftover estimate (e.g. a turn with no usage report).
+            self._stream_chars = 0
+            self._refresh_tokens()
             self._status().set(state="ready")
 
     def _on_permission(self, event: PermissionRequest) -> None:
