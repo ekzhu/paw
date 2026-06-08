@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -67,6 +68,19 @@ class ThemePicker(ModalScreen[ThemeInfo | str | None]):
     async def on_mount(self) -> None:
         self.query_one("#theme-list", ListView).index = 0
         self.query_one("#theme-search", Input).focus()
+
+    def on_key(self, event: events.Key) -> None:
+        # Search keeps focus for typing, so the single-line Input ignores
+        # up/down (they bubble here) — route them to move the list selection.
+        if event.key not in ("up", "down"):
+            return
+        theme_list = self.query_one("#theme-list", ListView)
+        if event.key == "down":
+            theme_list.action_cursor_down()
+        else:
+            theme_list.action_cursor_up()
+        event.stop()
+        event.prevent_default()
 
     async def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "theme-search":

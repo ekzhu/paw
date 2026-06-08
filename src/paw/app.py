@@ -30,6 +30,7 @@ from .events import (
     PermissionRequest,
     PlanUpdate,
     PushMessage,
+    SessionSummary,
     SessionTitle,
     SlashCommand,
     TextDelta,
@@ -39,6 +40,7 @@ from .events import (
     TransportError,
     TurnEnded,
     Usage,
+    UserTurn,
 )
 from .paths import state_dir
 from .themes import (
@@ -63,6 +65,7 @@ from .widgets import (
     PromptInput,
     PushMessageBox,
     QueuedMessage,
+    SessionPicker,
     StatusBar,
     ThemePicker,
     ThoughtMessage,
@@ -155,11 +158,15 @@ class PawApp(App):
         *,
         agent: str = "default",
         target: str | None = None,
+        resume_session_id: str | None = None,
     ) -> None:
         super().__init__()
         self._transport = transport
         self._agent = agent
         self._target = target
+        # When launched with --resume, the transport opens this session and
+        # replays its history; skip the welcome banner so the two don't mix.
+        self._resume_session_id = resume_session_id
         self._assistant: AssistantMessage | None = None
         self._thought: ThoughtMessage | None = None
         self._activity: ActivityLine | None = None
@@ -195,6 +202,10 @@ class PawApp(App):
         self._menu = CommandMenu()
         self._agent_commands: list[SlashCommand] = []
         self._local_commands = _local_commands()
+        # Recent resumable sessions, surfaced as `/resume <id>` auto-suggest
+        # entries (populated from the backend once connected).
+        self._recent_sessions: list[SessionSummary] = []
+        self._session_commands: list[SlashCommand] = []
         self._set_command_catalog()
         # The model QwenPaw reports it is using (read-only, for the status bar
         # and error messages). paw does not select or configure models.
@@ -222,12 +233,17 @@ class PawApp(App):
         self.query_one("#prompt", PromptInput).focus()
         self._status().set(agent=self._agent)
         self._apply_theme_prompt(self._theme_prompt, notify=False)
-        await self._mount(
-            WelcomeMessage(
-                palette_for_prompt(self._theme_prompt),
-                accent_for_prompt(self._theme_prompt),
+        if self._resume_session_id is not None:
+            await self._mount(
+                InfoMessage("Resumed previous session — replaying history…")
             )
-        )
+        else:
+            await self._mount(
+                WelcomeMessage(
+                    palette_for_prompt(self._theme_prompt),
+                    accent_for_prompt(self._theme_prompt),
+                )
+            )
         self._consume()
 
     # -- helpers -------------------------------------------------------------
@@ -240,13 +256,45 @@ class PawApp(App):
     def _set_command_catalog(self) -> None:
         seen: set[str] = set()
         commands: list[SlashCommand] = []
-        for command in [*self._local_commands, *self._agent_commands]:
+        for command in [
+            *self._local_commands,
+            *self._session_commands,
+            *self._agent_commands,
+        ]:
             if command.name in seen:
                 continue
             seen.add(command.name)
             commands.append(command)
         self._suggester.set_commands(commands)
         self._menu.set_commands(commands)
+
+    # Cap for the `/resume` auto-suggest list (most recent N chats).
+    _RECENT_SESSION_LIMIT = 10
+
+    def _set_recent_sessions(self, sessions: list[SessionSummary]) -> None:
+        """Refresh the `/resume <id>` auto-suggest entries (most recent N).
+
+        Each becomes a ``resume <short-id>`` command whose description is the
+        session title, so it surfaces in the menu exactly like ``/theme <id>``.
+        """
+        self._recent_sessions = list(sessions[: self._RECENT_SESSION_LIMIT])
+        self._session_commands = [
+            SlashCommand(
+                f"resume {session.session_id[:8]}",
+                session.title or "(untitled)",
+            )
+            for session in self._recent_sessions
+        ]
+        self._set_command_catalog()
+
+    @work(group="recent-sessions", exclusive=True)
+    async def _refresh_recent_sessions(self) -> None:
+        """Pull recent sessions from the backend for the auto-suggest list."""
+        try:
+            sessions = await self._transport.list_sessions()
+        except Exception:  # noqa: BLE001 - best-effort; suggestions are extra
+            return
+        self._set_recent_sessions(sessions)
 
     async def _mount(self, widget) -> None:
         await self._transcript().mount(widget)
@@ -432,11 +480,15 @@ class PawApp(App):
             case "/help":
                 await self._mount(
                     InfoMessage(
-                        "Try /theme <prompt> to personalize the background, "
+                        "Type /resume to pick a recent session from the "
+                        "suggestions (or /resume list to browse all), "
+                        "/theme <prompt> to personalize the background, "
                         "or /inspect for details. Model and provider "
                         "commands (e.g. /model) are handled by QwenPaw."
                     )
                 )
+            case "/resume":
+                await self._handle_resume_command(rest.strip())
             case "/theme":
                 await self._handle_theme_command(rest.strip())
             case "/inspect":
@@ -474,6 +526,100 @@ class PawApp(App):
             self.notify(f"{theme.emoji} {theme.name}", timeout=2)
             return
         self._apply_theme_prompt(theme)
+
+    async def _handle_resume_command(self, rest: str = "") -> None:
+        if self._busy:
+            await self._mount(
+                InfoMessage(
+                    "Finish or interrupt the current turn before resuming.",
+                    level="warn",
+                )
+            )
+            return
+        try:
+            sessions = await self._transport.list_sessions()
+        except Exception as exc:  # noqa: BLE001 - surface, don't crash
+            await self._mount(
+                InfoMessage(f"Could not list sessions: {exc}", level="warn")
+            )
+            return
+        # Keep the auto-suggest entries fresh from this same fetch.
+        self._set_recent_sessions(sessions)
+        if not sessions:
+            await self._mount(
+                InfoMessage("No previous sessions yet.", level="info")
+            )
+            return
+
+        # `/resume <id>` (e.g. picked from the auto-suggest list) resumes
+        # directly; bare `/resume` (or `/resume list`) opens the full picker.
+        if rest and rest.lower() not in {"list", "all", "browse"}:
+            session_id = self._resolve_session_ref(rest, sessions)
+            if session_id is None:
+                await self._mount(
+                    InfoMessage(
+                        f"No session matches '{rest}'. Try /resume list.",
+                        level="warn",
+                    )
+                )
+                return
+            self.query_one("#prompt", PromptInput).focus()
+            await self._resume_session(session_id)
+            return
+
+        def _on_pick(session_id: str | None) -> None:
+            self.query_one("#prompt", PromptInput).focus()
+            if session_id is None:
+                return
+            self.run_worker(
+                self._resume_session(session_id), exclusive=False
+            )
+
+        await self.push_screen(SessionPicker(sessions), callback=_on_pick)
+
+    @staticmethod
+    def _resolve_session_ref(
+        ref: str, sessions: list[SessionSummary]
+    ) -> str | None:
+        """Map a `/resume` argument to a full session id.
+
+        The auto-suggest entries use a short id (first 8 chars), so match by
+        prefix first; fall back to an exact id so a full id still works.
+        """
+        for session in sessions:
+            if session.session_id == ref:
+                return session.session_id
+        for session in sessions:
+            if session.session_id.startswith(ref):
+                return session.session_id
+        return None
+
+    async def _resume_session(self, session_id: str) -> None:
+        # Wipe the current (fresh) transcript so the replayed history isn't
+        # mixed with the welcome banner, then reset all per-turn lane state.
+        await self._transcript().remove_children()
+        self._assistant = None
+        self._thought = None
+        self._activity = None
+        self._labeled = False
+        self._tools.clear()
+        self._file_links_seen.clear()
+        self._tok_in = 0
+        self._tok_out = 0
+        self._stream_chars = 0
+        self._refresh_tokens()
+        # Mounted before the load so it sits above the replayed transcript;
+        # the replay updates only land once load_session is awaited below.
+        await self._mount(
+            InfoMessage("Resumed previous session — replaying history…")
+        )
+        try:
+            await self._transport.load_session(session_id)
+        except Exception as exc:  # noqa: BLE001
+            await self._mount(ErrorMessage(f"Could not resume: {exc}"))
+            return
+        self._status().set(session=session_id)
+        self._set_terminal_title(f"QwenPaw {session_id[:8]}")
 
     async def _handle_prompt_paste(self, text: str) -> str | None:
         try:
@@ -601,6 +747,8 @@ class PawApp(App):
         # Start with the session id; replaced by the real title once the
         # agent reports one (see SessionTitle).
         self._set_terminal_title(f"QwenPaw {str(ev.session_id)[:8]}")
+        # Populate the `/resume` auto-suggest list from past sessions.
+        self._refresh_recent_sessions()
 
     # Rough bytes-per-token for the live output estimate (~4 chars/token for
     # typical text; intentionally crude — it's marked approximate and is
@@ -703,6 +851,19 @@ class PawApp(App):
                 self._file_links_seen.add(key)
                 await self._mount(FileLinkBox(link.name, link.uri))
 
+        elif isinstance(event, UserTurn):
+            # A user turn replayed from a resumed session. Close any open
+            # assistant lane so the next replayed reply starts its own bubble.
+            if self._thought is not None:
+                self._thought.done()
+                self._thought = None
+            if self._activity is not None:
+                self._activity.done()
+                self._activity = None
+            self._assistant = None
+            self._labeled = False
+            await self._mount(UserMessage(event.text))
+
         elif isinstance(event, SessionTitle):
             self._set_terminal_title(f"QwenPaw {event.title}")
 
@@ -787,6 +948,9 @@ class PawApp(App):
                 )
             # Hand off to the next message the user queued while we worked.
             await self._drain_queue()
+            # The just-finished exchange makes this (or a resumed) session the
+            # newest; refresh the /resume auto-suggest list to reflect it.
+            self._refresh_recent_sessions()
 
     def _mark_backend_update(self) -> None:
         # Reached on every text / thought / tool event, i.e. anything the user
@@ -838,6 +1002,7 @@ def _local_commands() -> list[SlashCommand]:
     QwenPaw's and are forwarded to the agent, not listed here."""
     commands = [
         SlashCommand("help", "show QwenPaw TUI shortcuts"),
+        SlashCommand("resume", "resume a previous session"),
         SlashCommand("theme", "open theme gallery or apply a vibe"),
         SlashCommand("inspect", "toggle deeper thought/tool detail"),
     ]

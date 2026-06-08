@@ -7,6 +7,8 @@ import asyncio
 
 import pytest
 
+from textual.widgets import ListView
+
 from paw.app import PawApp
 from paw.__version__ import __version__
 from paw.events import (
@@ -16,6 +18,7 @@ from paw.events import (
     FileLink,
     PermissionOption,
     PermissionRequest,
+    SessionSummary,
     SessionTitle,
     SlashCommand,
     TextDelta,
@@ -23,6 +26,7 @@ from paw.events import (
     TokenUsage,
     ToolCall,
     TurnEnded,
+    UserTurn,
 )
 from paw.widgets import (
     ActivityLine,
@@ -31,8 +35,10 @@ from paw.widgets import (
     CommandMenu,
     ErrorMessage,
     FileLinkBox,
+    InfoMessage,
     PermissionModal,
     QueuedMessage,
+    SessionPicker,
     StatusBar,
     ThoughtMessage,
     ToolPanel,
@@ -45,15 +51,26 @@ from paw.widgets import (
 class FakeTransport:
     """In-process transport that scripts a canned turn for the UI."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, resume_session_id: str | None = None) -> None:
         self._queue: asyncio.Queue = asyncio.Queue()
         self.sent: list[str] = []
         self.interrupted = False
         self.resolved: list[tuple[str, str | None]] = []
         self.closed = False
         self._permission_mode = "none"
+        # Resume support: past sessions to offer, and a record of loads.
+        self.sessions: list[SessionSummary] = []
+        self.loaded: list[str] = []
+        self._resume_session_id = resume_session_id
 
     async def start(self) -> Connected:
+        if self._resume_session_id is not None:
+            await self.load_session(self._resume_session_id)
+            return Connected(
+                session_id=self._resume_session_id,
+                agent="default",
+                qwenpaw_version="9.8.7",
+            )
         return Connected(
             session_id="sess-abc",
             agent="default",
@@ -91,6 +108,16 @@ class FakeTransport:
     async def interrupt(self) -> None:
         self.interrupted = True
         await self._queue.put(TurnEnded(stop_reason="cancelled"))
+
+    async def list_sessions(self) -> list[SessionSummary]:
+        return list(self.sessions)
+
+    async def load_session(self, session_id: str) -> None:
+        self.loaded.append(session_id)
+        # Replay a tiny saved transcript, like the real backend does.
+        await self._queue.put(UserTurn("How do I write a loop in Rust?"))
+        await self._queue.put(TextDelta("Use a `for` loop."))
+        await self._queue.put(UserTurn("Thanks!"))
 
     def events(self):
         async def _gen():
@@ -647,6 +674,187 @@ async def test_theme_command_opens_gallery_without_chat_turn():
         assert isinstance(app.screen, ThemePicker)
         assert transport.sent == []
         app.screen.dismiss(None)
+
+
+@pytest.mark.asyncio
+async def test_resume_with_no_sessions_shows_info():
+    transport = FakeTransport()  # no past sessions
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#prompt").value = "/resume "
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not isinstance(app.screen, SessionPicker)
+        infos = [
+            i.content.plain for i in app.query(InfoMessage)
+        ]
+        assert any("No previous sessions yet" in text for text in infos)
+        assert transport.sent == []  # never forwarded to the agent
+
+
+@pytest.mark.asyncio
+async def test_resume_opens_picker_and_replays_selected_session():
+    transport = FakeTransport()
+    transport.sessions = [
+        SessionSummary(
+            session_id="old-1",
+            title="Earlier chat about Rust",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+    ]
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#prompt").value = "/resume list"
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+            if isinstance(app.screen, SessionPicker):
+                break
+        assert isinstance(app.screen, SessionPicker)
+
+        # Pick the only session.
+        app.screen.dismiss("old-1")
+        for _ in range(10):
+            await pilot.pause()
+            if transport.loaded:
+                break
+
+        assert transport.loaded == ["old-1"]
+        # Welcome banner is cleared; the replayed transcript renders instead.
+        assert not list(app.query(WelcomeMessage))
+        user_msgs = [u.content.plain for u in app.query(UserMessage)]
+        assert "How do I write a loop in Rust?" in " ".join(user_msgs)
+        assert "Thanks!" in " ".join(user_msgs)
+        assistant = app.query(AssistantMessage).first()
+        assert "Use a `for` loop." in assistant.text
+        assert transport.sent == []
+        assert "old-1" in app.query_one(StatusBar).summary
+
+
+@pytest.mark.asyncio
+async def test_session_picker_arrow_keys_move_selection():
+    transport = FakeTransport()
+    transport.sessions = [
+        SessionSummary(session_id="s1", title="First chat"),
+        SessionSummary(session_id="s2", title="Second chat"),
+        SessionSummary(session_id="s3", title="Third chat"),
+    ]
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#prompt").value = "/resume list"
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+            if isinstance(app.screen, SessionPicker):
+                break
+        assert isinstance(app.screen, SessionPicker)
+        # Search input has focus, yet ↓/↑ move the list selection.
+        assert app.screen.query_one("#session-list", ListView).index == 0
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.screen.query_one("#session-list", ListView).index == 1
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.screen.query_one("#session-list", ListView).index == 2
+        await pilot.press("up")
+        await pilot.pause()
+        assert app.screen.query_one("#session-list", ListView).index == 1
+
+        # Enter resumes whatever is highlighted (the 2nd session).
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+            if transport.loaded:
+                break
+        assert transport.loaded == ["s2"]
+
+
+@pytest.mark.asyncio
+async def test_theme_picker_arrow_keys_move_selection():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#prompt").value = "/theme gallery"
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+            if isinstance(app.screen, ThemePicker):
+                break
+        assert isinstance(app.screen, ThemePicker)
+        assert app.screen.query_one("#theme-list", ListView).index == 0
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.screen.query_one("#theme-list", ListView).index == 1
+        await pilot.press("up")
+        await pilot.pause()
+        assert app.screen.query_one("#theme-list", ListView).index == 0
+        app.screen.dismiss(None)
+
+
+@pytest.mark.asyncio
+async def test_resume_autosuggest_lists_recent_ten():
+    transport = FakeTransport()
+    # 12 sessions; only the most recent 10 should become suggestions.
+    transport.sessions = [
+        SessionSummary(session_id=f"{i:02d}cdef00" + "0" * 24, title=f"Chat {i}")
+        for i in range(12)
+    ]
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        for _ in range(10):
+            await pilot.pause()
+            if app._session_commands:
+                break
+        names = [c.name for c in app._menu._commands]
+        resume_entries = [n for n in names if n.startswith("resume ")]
+        assert len(resume_entries) == 10  # capped at the 10 most recent
+        # Short id + the session title as description, like /theme <id>.
+        assert "resume 00cdef00" in names
+        cmd = next(c for c in app._menu._commands if c.name == "resume 00cdef00")
+        assert cmd.description == "Chat 0"
+
+
+@pytest.mark.asyncio
+async def test_resume_with_id_arg_resumes_directly_without_picker():
+    transport = FakeTransport()
+    full_id = "00cdef00" + "0" * 24
+    transport.sessions = [SessionSummary(session_id=full_id, title="Chat 0")]
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Trailing space closes the suggest menu so Enter submits the line.
+        app.query_one("#prompt").value = "/resume 00cdef00 "
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+            if transport.loaded:
+                break
+        # Resolved the short id to the full session and resumed it directly.
+        assert transport.loaded == [full_id]
+        assert not isinstance(app.screen, SessionPicker)
+        assert transport.sent == []
+
+
+@pytest.mark.asyncio
+async def test_resume_flag_skips_welcome_and_replays_at_start():
+    transport = FakeTransport(resume_session_id="old-1")
+    app = PawApp(transport, resume_session_id="old-1")
+    async with app.run_test() as pilot:
+        for _ in range(10):
+            await pilot.pause()
+            if transport.loaded:
+                break
+        # No welcome banner; the resumed transcript renders instead.
+        assert not list(app.query(WelcomeMessage))
+        assert transport.loaded == ["old-1"]
+        user_msgs = " ".join(u.content.plain for u in app.query(UserMessage))
+        assert "How do I write a loop in Rust?" in user_msgs
+        assert "Thanks!" in user_msgs
+        assert "old-1" in app.query_one(StatusBar).summary
 
 
 @pytest.mark.asyncio

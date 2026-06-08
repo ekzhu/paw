@@ -18,6 +18,7 @@ import asyncio
 from acp import (
     Agent,
     InitializeResponse,
+    LoadSessionResponse,
     NewSessionResponse,
     PROTOCOL_VERSION,
     PromptResponse,
@@ -28,13 +29,25 @@ from acp import (
     update_agent_message,
     update_agent_thought,
     update_tool_call,
+    update_user_message,
 )
 from acp.schema import (
     AgentCapabilities,
     Implementation,
+    ListSessionsResponse,
     PermissionOption,
+    SessionInfo,
     ToolCallUpdate,
 )
+
+# A canned "past" session the resume tests can list and load.
+_PAST_SESSION_ID = "old-session-1"
+_PAST_SESSION_TITLE = "Earlier chat about Rust"
+_PAST_HISTORY = [
+    ("user", "How do I write a loop in Rust?"),
+    ("agent", "Use a `for` loop over a range."),
+    ("user", "Thanks!"),
+]
 
 
 class FakeAgent(Agent):
@@ -69,6 +82,34 @@ class FakeAgent(Agent):
         ev = self._cancel.get(session_id)
         if ev:
             ev.set()
+
+    async def list_sessions(
+        self, cursor=None, cwd=None, additional_directories=None, **kw
+    ):  # noqa: ANN001
+        return ListSessionsResponse(
+            sessions=[
+                SessionInfo(
+                    session_id=_PAST_SESSION_ID,
+                    cwd=cwd or "",
+                    title=_PAST_SESSION_TITLE,
+                    updated_at="2026-01-01T00:00:00+00:00",
+                )
+            ]
+        )
+
+    async def load_session(
+        self, cwd, session_id, additional_directories=None, mcp_servers=None,
+        **kw,
+    ):  # noqa: ANN001
+        for role, text in _PAST_HISTORY:
+            if role == "user":
+                update = update_user_message(text_block(text))
+            else:
+                update = update_agent_message(text_block(text))
+            await self._conn.session_update(
+                session_id=session_id, update=update
+            )
+        return LoadSessionResponse()
 
     async def prompt(
         self, prompt, session_id, message_id=None, **kw

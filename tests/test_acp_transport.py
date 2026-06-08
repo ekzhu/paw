@@ -18,6 +18,7 @@ from paw.events import (
     ToolCall,
     TransportError,
     TurnEnded,
+    UserTurn,
 )
 from paw.transport.acp import AcpTransport
 
@@ -132,6 +133,83 @@ async def test_interrupt_cancels_turn():
         await transport.close()
 
     assert isinstance(events[-1], TurnEnded)
+
+
+@pytest.mark.asyncio
+async def test_list_sessions():
+    transport = _transport()
+    try:
+        await asyncio.wait_for(transport.start(), timeout=10.0)
+        sessions = await asyncio.wait_for(
+            transport.list_sessions(), timeout=10.0
+        )
+    finally:
+        await transport.close()
+
+    assert len(sessions) == 1
+    assert sessions[0].session_id == "old-session-1"
+    assert sessions[0].title == "Earlier chat about Rust"
+    assert sessions[0].updated_at
+
+
+@pytest.mark.asyncio
+async def test_start_with_resume_loads_and_replays():
+    transport = AcpTransport(
+        command=[sys.executable, FAKE], resume_session_id="old-session-1"
+    )
+    try:
+        connected = await asyncio.wait_for(transport.start(), timeout=10.0)
+        # start() loaded the requested session instead of opening a new one.
+        assert connected.session_id == "old-session-1"
+        assert transport.session_id == "old-session-1"
+
+        events = []
+
+        async def _run():
+            async for ev in transport.events():
+                events.append(ev)
+                if len([e for e in events if isinstance(e, UserTurn)]) >= 2:
+                    return
+
+        await asyncio.wait_for(_run(), timeout=5.0)
+    finally:
+        await transport.close()
+
+    users = [e.text for e in events if isinstance(e, UserTurn)]
+    assert users == ["How do I write a loop in Rust?", "Thanks!"]
+
+
+@pytest.mark.asyncio
+async def test_load_session_replays_history():
+    transport = _transport()
+    try:
+        await asyncio.wait_for(transport.start(), timeout=10.0)
+        await asyncio.wait_for(
+            transport.load_session("old-session-1"), timeout=10.0
+        )
+        assert transport.session_id == "old-session-1"
+        # The replayed history is delivered as session updates; drain until
+        # both replayed user turns have arrived (a BackendWarmed event from
+        # the warmup may be interleaved ahead of them).
+        events = []
+
+        async def _run():
+            async for ev in transport.events():
+                events.append(ev)
+                if len([e for e in events if isinstance(e, UserTurn)]) >= 2:
+                    return
+
+        await asyncio.wait_for(_run(), timeout=5.0)
+    finally:
+        await transport.close()
+
+    user_turns = [e for e in events if isinstance(e, UserTurn)]
+    assert [u.text for u in user_turns] == [
+        "How do I write a loop in Rust?",
+        "Thanks!",
+    ]
+    replayed = "".join(e.text for e in events if isinstance(e, TextDelta))
+    assert "Use a `for` loop over a range." in replayed
 
 
 def test_session_agent_reads_meta():

@@ -31,6 +31,7 @@ from .events import (
     TransportError,
     TuiEvent,
     Usage,
+    UserTurn,
 )
 
 # Tool-content block types that carry a file/resource URI worth linking.
@@ -222,6 +223,11 @@ def normalize_update(update: Any) -> list[TuiEvent]:
         title = getattr(update, "title", None)
         return [SessionTitle(str(title))] if title else []
 
-    # current_mode / config_option / user_message_chunk:
-    # not surfaced in the chat transcript (yet).
+    if kind == "user_message_chunk":
+        # Emitted only while a resumed session replays its saved transcript;
+        # surface it so the prior user turns render in the rebuilt history.
+        text = _block_text(getattr(update, "content", None))
+        return [UserTurn(text)] if text else []
+
+    # current_mode / config_option: not surfaced in the chat transcript (yet).
     return []

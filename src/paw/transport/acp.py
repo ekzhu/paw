@@ -42,6 +42,7 @@ from ..events import (
     PermissionOption,
     PermissionRequest,
     PushMessage,
+    SessionSummary,
     TransportError,
     TurnEnded,
     TuiEvent,
@@ -63,6 +64,12 @@ _WARMUP_PROMPT = (
     "Warm up the QwenPaw backend for an interactive terminal session. "
     "Reply with exactly: ready. Do not call tools."
 )
+
+# ``_meta`` flag marking the warmup session ephemeral so the QwenPaw ACP server
+# never registers a console chat or persists state for it. Passed as an extra
+# kwarg on ``new_session``/``prompt`` (the ACP client folds extra kwargs into
+# the request's ``_meta``). Mirrors the server's ``ACP_EPHEMERAL_META_KEY``.
+_EPHEMERAL_META_KEY = "qwenpaw.ephemeral"
 
 
 def _open_agent_stderr_log() -> tuple[int | None, str | None]:
@@ -241,9 +248,13 @@ class AcpTransport:
         agent: str | None = None,
         cwd: str | None = None,
         command: list[str] | None = None,
+        resume_session_id: str | None = None,
     ) -> None:
         self._agent = agent
         self._cwd = cwd or os.getcwd()
+        # When set, ``start()`` resumes this session (load + replay) instead
+        # of opening a fresh one.
+        self._resume_session_id = resume_session_id
         # Default: re-invoke this very interpreter as `python -m qwenpaw acp`.
         self._command = command or [sys.executable, "-m", "qwenpaw", "acp"]
         if agent:
@@ -293,17 +304,30 @@ class AcpTransport:
                 initialized.protocol_version,
                 PROTOCOL_VERSION,
             )
-        new_session = await self._conn.new_session(cwd=self._cwd)
-        self._session_id = new_session.session_id
-        self._client.set_session_id(self._session_id)
+        if self._resume_session_id is not None:
+            # Point the client at the resumed session before loading so its
+            # replayed history updates (tagged with this id) aren't filtered.
+            self._session_id = self._resume_session_id
+            self._client.set_session_id(self._session_id)
+            session = await self._conn.load_session(
+                cwd=self._cwd, session_id=self._session_id
+            )
+            # LoadSessionResponse carries no model list; it populates from the
+            # first turn's usage report instead.
+            model = None
+        else:
+            session = await self._conn.new_session(cwd=self._cwd)
+            self._session_id = session.session_id
+            self._client.set_session_id(self._session_id)
+            model = _current_model(session)
         if not _warmup_disabled():
             self._warmup_task = asyncio.create_task(self._warm_backend())
         return Connected(
             session_id=self._session_id,
             # Prefer the agent the server actually resolved (via _meta) over
             # the one we requested, so the UI shows the real agent.
-            agent=_session_agent(new_session) or self._agent,
-            model=_current_model(new_session),
+            agent=_session_agent(session) or self._agent,
+            model=model,
             qwenpaw_version=_agent_version(initialized),
             warming=self._warmup_task is not None,
         )
@@ -313,7 +337,9 @@ class AcpTransport:
         try:
             if self._conn is None:
                 return
-            warm_session = await self._conn.new_session(cwd=self._cwd)
+            warm_session = await self._conn.new_session(
+                cwd=self._cwd, **{_EPHEMERAL_META_KEY: True}
+            )
             warm_session_id = warm_session.session_id
             if warm_session_id == self._session_id:
                 logger.debug(
@@ -331,6 +357,7 @@ class AcpTransport:
             await self._conn.prompt(
                 prompt=[text_block(_WARMUP_PROMPT)],
                 session_id=warm_session_id,
+                **{_EPHEMERAL_META_KEY: True},
             )
             await self._queue.put(BackendWarmed())
         except asyncio.CancelledError:
@@ -415,6 +442,48 @@ class AcpTransport:
             await self._conn.cancel(session_id=self._session_id)
         except Exception as exc:  # noqa: BLE001
             logger.debug("cancel failed: %s", exc)
+
+    async def list_sessions(self) -> list[SessionSummary]:
+        if self._conn is None:
+            raise RuntimeError("transport not started")
+        # No cwd filter: QwenPaw runs every session in its single workspace
+        # dir regardless of where paw was launched, so all past sessions are
+        # equally resumable. Listing them folder-scoped would just hide work.
+        response = await self._conn.list_sessions()
+        summaries: list[SessionSummary] = []
+        for info in getattr(response, "sessions", None) or []:
+            session_id = getattr(info, "session_id", None)
+            if not session_id:
+                continue
+            summaries.append(
+                SessionSummary(
+                    session_id=str(session_id),
+                    title=str(getattr(info, "title", "") or ""),
+                    cwd=str(getattr(info, "cwd", "") or ""),
+                    updated_at=str(getattr(info, "updated_at", "") or ""),
+                )
+            )
+        return summaries
+
+    async def load_session(self, session_id: str) -> None:
+        if self._conn is None:
+            raise RuntimeError("transport not started")
+        if self._prompt_task is not None and not self._prompt_task.done():
+            raise RuntimeError("a turn is already in progress")
+        # Let any in-flight warmup finish first; it drives its own (ignored)
+        # session, but loading mid-warmup risks interleaved backend work.
+        if self._warmup_task is not None and not self._warmup_task.done():
+            try:
+                await self._warmup_task
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - warmup is best-effort
+                logger.debug("warmup task failed before load", exc_info=True)
+        # Point the client at the resumed session *before* loading so the
+        # replayed history updates (tagged with this id) aren't filtered out.
+        self._session_id = session_id
+        self._client.set_session_id(session_id)
+        await self._conn.load_session(cwd=self._cwd, session_id=session_id)
 
     async def resolve_permission(
         self, request_id: str, option_id: str | None

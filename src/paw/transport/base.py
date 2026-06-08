@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import AsyncIterator, Protocol, runtime_checkable
 
-from ..events import Connected, TuiEvent
+from ..events import Connected, SessionSummary, TuiEvent
 
 
 @runtime_checkable
@@ -26,6 +26,14 @@ class TuiTransport(Protocol):
 
     async def interrupt(self) -> None:
         """Cancel the in-flight turn, if any."""
+        ...
+
+    async def list_sessions(self) -> list[SessionSummary]:
+        """Return resumable past sessions (most recent first)."""
+        ...
+
+    async def load_session(self, session_id: str) -> None:
+        """Switch to a past session and replay its saved transcript."""
         ...
 
     def events(self) -> AsyncIterator[TuiEvent]:

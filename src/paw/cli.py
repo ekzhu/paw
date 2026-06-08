@@ -20,6 +20,7 @@ def _build_transport(
     *,
     agent: str | None,
     agent_cmd: str | None,
+    resume: str | None = None,
 ):
     """Return ``(transport, description)`` for the requested target."""
     # An ACP/stdio agent: explicit --agent-cmd, or `qwenpaw acp` on PATH.
@@ -31,7 +32,11 @@ def _build_transport(
     from .transport.acp import AcpTransport
 
     return (
-        AcpTransport(agent=agent, command=resolved.command),
+        AcpTransport(
+            agent=agent,
+            command=resolved.command,
+            resume_session_id=resume,
+        ),
         resolved.description,
     )
 
@@ -45,17 +50,32 @@ def _build_transport(
     help="Explicit command that speaks ACP over stdio "
     "(e.g. 'qwenpaw acp'). Overrides discovery.",
 )
+@click.option(
+    "--resume",
+    default=None,
+    metavar="SESSION_ID",
+    help="Resume a previous session by id (use /resume in-app to browse). "
+    "Replays that session's transcript and continues it.",
+)
 @click.version_option(version=__version__, prog_name="paw")
 def main(
     agent: str | None,
     agent_cmd: str | None,
+    resume: str | None,
 ) -> None:
     """paw — a terminal chat UI for QwenPaw."""
-    transport, description = _build_transport(agent=agent, agent_cmd=agent_cmd)
+    transport, description = _build_transport(
+        agent=agent, agent_cmd=agent_cmd, resume=resume
+    )
 
     from .app import PawApp
 
-    PawApp(transport, agent=agent or "default", target=description).run()
+    PawApp(
+        transport,
+        agent=agent or "default",
+        target=description,
+        resume_session_id=resume,
+    ).run()
 
 
 if __name__ == "__main__":

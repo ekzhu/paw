@@ -155,6 +155,27 @@ class PushMessage:
 
 
 @dataclass(frozen=True)
+class UserTurn:
+    """A user message replayed from a resumed session's saved transcript.
+
+    Only emitted during ``session/load`` history replay — live user input is
+    rendered directly by the UI, not round-tripped through the transport.
+    """
+
+    text: str
+
+
+@dataclass(frozen=True)
+class SessionSummary:
+    """One resumable past session, for the /resume picker."""
+
+    session_id: str
+    title: str = ""
+    cwd: str = ""
+    updated_at: str = ""
+
+
+@dataclass(frozen=True)
 class TurnEnded:
     """The current prompt turn finished."""
 
@@ -182,6 +203,7 @@ TuiEvent = (
     | PermissionRequest
     | AvailableCommands
     | PushMessage
+    | UserTurn
     | TurnEnded
     | TransportError
 )
