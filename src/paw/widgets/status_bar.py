@@ -104,7 +104,11 @@ class StatusBar(Static):
         }.get(self._sb_state, "#8a8a8a")
 
         line = Text()
-        line.append(" paw ", style="bold on #2a2a3a")
+        # Version badge — top-left (replaces the old "paw" badge).
+        line.append(
+            f" QwenPaw {self._sb_qwenpaw_version}  TUI {self._sb_tui_version} ",
+            style="bold on #2a2a3a",
+        )
         line.append("  agent:", style="#8a8a8a")
         line.append(f"{self._sb_agent}", style="bold")
         line.append("  ", style="")
@@ -146,15 +150,9 @@ class StatusBar(Static):
             glyph = "✗"
         else:
             glyph = "●"
-        line.append("   ", style="")
-        line.append(f"{glyph} {self._sb_state}", style=f"bold {state_color}")
+        # State indicator — pushed to the right edge.
         right = Text()
-        right.append(
-            f"QwenPaw {self._sb_qwenpaw_version}",
-            style="#8a8a8a",
-        )
-        right.append("   ", style="")
-        right.append(f"TUI {self._sb_tui_version}", style="#8a8a8a")
+        right.append(f"{glyph} {self._sb_state}", style=f"bold {state_color}")
         mounted = getattr(self, "_is_mounted", False)
         width = self.size.width if mounted else 0
         gap = max(3, width - line.cell_len - right.cell_len)

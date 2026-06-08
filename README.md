@@ -2,47 +2,19 @@
 
 A terminal chat UI for [QwenPaw](https://github.com/agentscope-ai/QwenPaw).
 
-`paw` is a small, fast [Textual](https://textual.textualize.io/) front-end that
-drives a QwenPaw agent over **ACP** (Agent Client Protocol). It streams replies
-and thinking, renders tool calls as inline panels, handles permission prompts,
-and forwards slash commands (`/model`, `/clear`, `/compact`, …) straight to the
-agent.
+QwenPaw-TUI is a small, fast [Textual](https://textual.textualize.io/) front-end
+that drives a QwenPaw agent over **ACP** (Agent Client Protocol). It streams
+replies and thinking, renders tool calls as inline panels, handles permission
+prompts, and forwards slash commands (`/model`, `/clear`, `/compact`, …)
+straight to the agent. Its command-line tool is `paw`.
 
 It primarily speaks ACP, so it stays light and is released independently of
 QwenPaw. When QwenPaw is importable in the same environment, the TUI can also
 read its provider catalog and save provider keys directly from `/providers`.
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│ paw  agent:default  qwen3.7-max  ● ready          QwenPaw 1.1.10   TUI 0.1.0 │
-│                                                                              │
-│                                                     ██   ██   ██             │
-│                                                    ███  ███  ███             │
-│                                                     ██   ██   ██             │
-│                                                                              │
-│    ██████   ██     ██   █████   ██████   ███████      ███████     ██     ██ │
-│   ██    ██  ██     ██  ██   ██  ██   ██  ██    ██    ███   ███    ██     ██│
-│  ██      ██ ██     ██ ██     ██ ██    ██ ██    ██   ███     ███   ██     ██│
-│  ██      ██ ██  █  ██ ██     ██ ██    ██ ██    ██   ███  █  ███   ██  █  █│
-│  ██      ██ ██  █  ██ █████████ ██    ██ ███████    ███████████   ██  █  █│
-│  ██   █  ██ ██ ███ ██ ██        ██    ██ ██          █████████    ██ ███ ██│
-│  ██    ███  ████ ████ ██        ██    ██ ██             ███       ████ ████│
-│   ██    ██  ███   ███ ██    ██  ██    ██ ██             ███       ███   ███│
-│    ██████ █ ██     ██  ██████   ██    ██ ██                       ██     ██│
-│          █  ██     ██                                             ██     ██│
-│                                                                              │
-│  ❯ summarize today's unread newsletters                                      │
-│                                                                              │
-│  qwenpaw                                                                     │
-│   │ ● 🔧 read_inbox  12 messages, 3 unread                                   │
-│                                                                              │
-│  Here's what I found across your 3 sources…                                  │
-│  ▌                                                                           │
-│                                                                              │
-├──────────────────────────────────────────────────────────────────────────────┤
-│ ╭ type a message  (/ commands · ⏎ send/queue · ↑ edit queued · esc cancel… ╰ │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="assets/screenshot.png" alt="QwenPaw-TUI screenshot" width="760">
+</p>
 
 ## Install
 
@@ -52,7 +24,7 @@ read its provider catalog and save provider keys directly from `/providers`.
 pip install qwenpaw-tui   # expects `qwenpaw` on PATH or in the same env
 ```
 
-**Bundled** — install QwenPaw alongside paw in one go:
+**Bundled** — install QwenPaw alongside QwenPaw-TUI in one go:
 
 ```bash
 pip install "qwenpaw-tui[bundled]"   # pulls qwenpaw too; works with no separate install

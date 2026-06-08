@@ -66,7 +66,7 @@ class AgentLabel(Static):
 
 
 class WelcomeMessage(Static):
-    """Animated startup greeting rendered as terminal pixels."""
+    """Startup greeting rendered as embossed terminal pixels (static colour)."""
 
     _LOGO_PIXELS = (
         " ███████                              ████████    O O O",
@@ -80,8 +80,9 @@ class WelcomeMessage(Static):
     def __init__(
         self, palette: tuple[str, str, str] | None = None
     ) -> None:
+        # ``_frame`` is fixed at 0: the logo colour is static (no animation),
+        # so the gradient is a fixed vertical wash with the embossed shading.
         self._frame = 0
-        self._timer = None
         self._gradient_stops = (
             "#bfe1ff",
             "#8fd7ff",
@@ -93,17 +94,6 @@ class WelcomeMessage(Static):
         super().__init__(
             self._render_body(), classes="msg welcome"
         )
-
-    def on_mount(self) -> None:
-        self._timer = self.set_interval(0.32, self._tick)
-
-    def on_unmount(self) -> None:
-        if self._timer is not None:
-            self._timer.stop()
-
-    def _tick(self) -> None:
-        self._frame += 1
-        self.update(self._render_body())
 
     def set_palette(self, palette: tuple[str, str, str]) -> None:
         self._set_palette_colors(palette)
