@@ -8,12 +8,28 @@ and thinking, renders tool calls as inline panels, handles permission prompts,
 and forwards slash commands (`/model`, `/clear`, `/compact`, …) straight to the
 agent.
 
-It deliberately **does not import the QwenPaw backend** — it only speaks ACP — so
-it stays light and is released independently of QwenPaw.
+It primarily speaks ACP, so it stays light and is released independently of
+QwenPaw. When QwenPaw is importable in the same environment, the TUI can also
+read its provider catalog and save provider keys directly from `/providers`.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ paw  agent:default  qwen3.7-max  session:a1b2c3  tok ↑1.2k ↓3.4k   ⏺ ready   │
+│ paw  agent:default  qwen3.7-max  ● ready          QwenPaw 1.1.10   TUI 0.1.0 │
+│                                                                              │
+│                                                     ██   ██   ██             │
+│                                                    ███  ███  ███             │
+│                                                     ██   ██   ██             │
+│                                                                              │
+│    ██████   ██     ██   █████   ██████   ███████      ███████     ██     ██ │
+│   ██    ██  ██     ██  ██   ██  ██   ██  ██    ██    ███   ███    ██     ██│
+│  ██      ██ ██     ██ ██     ██ ██    ██ ██    ██   ███     ███   ██     ██│
+│  ██      ██ ██  █  ██ ██     ██ ██    ██ ██    ██   ███  █  ███   ██  █  █│
+│  ██      ██ ██  █  ██ █████████ ██    ██ ███████    ███████████   ██  █  █│
+│  ██   █  ██ ██ ███ ██ ██        ██    ██ ██          █████████    ██ ███ ██│
+│  ██    ███  ████ ████ ██        ██    ██ ██             ███       ████ ████│
+│   ██    ██  ███   ███ ██    ██  ██    ██ ██             ███       ███   ███│
+│    ██████ █ ██     ██  ██████   ██    ██ ██                       ██     ██│
+│          █  ██     ██                                             ██     ██│
 │                                                                              │
 │  ❯ summarize today's unread newsletters                                      │
 │                                                                              │
@@ -52,11 +68,27 @@ paw -p "what's on my calendar?"  # one-shot: print the answer and exit
 paw --agent-cmd "qwenpaw acp"    # drive an explicit ACP command
 ```
 
-Inside the chat: `⏎` send, `esc` interrupt the current turn, `ctrl+c` quit.
-Slash commands are forwarded to the agent. Type `/` to open a suggestion
-dropdown of the agent's commands (the agent advertises them over ACP) — `↑`/`↓`
-to pick, `⏎`/`⇥` to insert, `esc` to dismiss; an inline ghost completion of the
-top match is also shown (`→` accepts it).
+Inside the chat: `enter` sends, `shift+enter` inserts a newline, `esc`
+interrupts the current turn, `ctrl+r` runs voice input, and `ctrl+c` quits.
+
+Type `/` to open an overlay suggestion list. It includes local TUI commands,
+QwenPaw commands advertised over ACP, and argument completions such as
+`/theme cyberpunk` or `/model dashscope:qwen3-max`. Use `up`/`down` to pick,
+`tab` or `enter` to insert a highlighted suggestion, and `esc` to dismiss.
+Once an exact full command is typed, `enter` submits it.
+
+Useful local commands:
+
+- `/model` opens the provider/model picker.
+- `/providers` saves provider API keys from the TUI when QwenPaw is importable.
+- `/theme` opens the theme gallery; `/theme <prompt>` generates a persistent
+  vibe from your words.
+- `/voice` inserts dictated text from `PAW_VOICE_COMMAND`.
+- `/inspect` toggles between friendly chat and deeper tool/thought inspection.
+
+Pasting a file path or data URL attaches it to the prompt. Pasting long text
+stores it as a temporary attachment and inserts a reference, keeping the input
+usable.
 
 ## How it finds QwenPaw
 
@@ -71,8 +103,8 @@ top match is also shown (`→` accepts it).
 
 `paw` is an ACP **client**. It spawns the QwenPaw agent as a subprocess and
 exchanges JSON-RPC over stdio. Because QwenPaw already ships a full ACP
-agent (`qwenpaw acp`), paw reuses the entire backend — tools, memory, slash
-commands, permissions, model switching — without re-implementing any of it.
+agent (`qwenpaw acp`), paw reuses the backend for tools, memory, advertised
+slash commands, permissions, and model switching.
 
 The agent's stderr is drained to a log file under paw's state dir
 (`PAW_STATE_DIR`, or an OS default) so chatty tools (e.g. a headless browser)
@@ -82,8 +114,38 @@ can't deadlock the stdio stream.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # unit + transport + UI + CLI tests
+pytest -m "not integration"  # unit + transport + UI + CLI tests
 ```
+
+Run the live development-checkout integration tests with provider keys:
+
+```bash
+DASHSCOPE_API_KEY=... \
+OPENAI_API_KEY=... \
+ANTHROPIC_API_KEY=... \
+GEMINI_API_KEY=... \
+DEEPSEEK_API_KEY=... \
+  pytest tests/test_qwenpaw_dev_integration.py -m integration -vv
+```
+
+The integration suite defaults to
+`/Users/erkang.zhu/code/ContinueLearningBench/submodules/QwenPaw`, or set
+`QWENPAW_DEV_CHECKOUT=/path/to/QwenPaw`. It starts QwenPaw through
+`uv run --project <checkout> python -m qwenpaw acp`, verifies the imported
+module comes from that checkout, and sets temporary `QWENPAW_WORKING_DIR`,
+`QWENPAW_SECRET_DIR`, and `PAW_STATE_DIR` so it does not write to
+`~/.qwenpaw` or `~/.copaw`. It covers multi-turn conversation, a live
+`read_file` tool call through ACP, and two-turn provider smoke tests for
+DashScope, OpenAI, Anthropic, Gemini, and DeepSeek. Provider cases skip
+cleanly if the corresponding API key is absent.
+
+Default live-test models can be overridden with:
+
+- `PAW_E2E_DASHSCOPE_MODEL`
+- `PAW_E2E_OPENAI_MODEL`
+- `PAW_E2E_ANTHROPIC_MODEL`
+- `PAW_E2E_GEMINI_MODEL`
+- `PAW_E2E_DEEPSEEK_MODEL`
 
 ### Against a local QwenPaw checkout
 

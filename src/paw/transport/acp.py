@@ -37,6 +37,7 @@ from acp.schema import (
 
 from ..__version__ import __version__
 from ..events import (
+    BackendWarmed,
     Connected,
     PermissionOption,
     PermissionRequest,
@@ -57,6 +58,11 @@ _CLOSED = object()
 # 64 KB, which would drop the connection on a big tool payload — match the
 # agent's buffer so large messages stream through (same as service.py).
 _STDIO_BUFFER_LIMIT = 50 * 1024 * 1024
+
+_WARMUP_PROMPT = (
+    "Warm up the QwenPaw backend for an interactive terminal session. "
+    "Reply with exactly: ready. Do not call tools."
+)
 
 
 def _open_agent_stderr_log() -> tuple[int | None, str | None]:
@@ -80,6 +86,14 @@ def _open_agent_stderr_log() -> tuple[int | None, str | None]:
             return os.open(os.devnull, os.O_WRONLY), None
         except Exception:  # noqa: BLE001
             return None, None
+
+
+def _warmup_disabled() -> bool:
+    return os.getenv("PAW_DISABLE_BACKEND_WARMUP", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def _kill_process_tree(pid: int) -> None:
@@ -109,6 +123,14 @@ class _TuiClient:
     def __init__(self, queue: "asyncio.Queue[Any]") -> None:
         self._queue = queue
         self._pending: dict[str, asyncio.Future[str | None]] = {}
+        self._session_id: str | None = None
+        self._ignored_sessions: set[str] = set()
+
+    def set_session_id(self, session_id: str) -> None:
+        self._session_id = session_id
+
+    def ignore_session(self, session_id: str) -> None:
+        self._ignored_sessions.add(session_id)
 
     # -- connection lifecycle ------------------------------------------------
     def on_connect(self, conn: Any) -> None:  # noqa: D401 - ACP hook
@@ -118,7 +140,10 @@ class _TuiClient:
     async def session_update(
         self, session_id: str, update: Any, **_: Any
     ) -> None:
-        del session_id
+        if session_id in self._ignored_sessions:
+            return
+        if self._session_id is not None and session_id != self._session_id:
+            return
         for event in normalize_update(update):
             await self._queue.put(event)
 
@@ -130,7 +155,14 @@ class _TuiClient:
         tool_call: Any,
         **_: Any,
     ) -> RequestPermissionResponse:
-        del session_id
+        if session_id in self._ignored_sessions:
+            return RequestPermissionResponse(
+                outcome=DeniedOutcome(outcome="cancelled")
+            )
+        if self._session_id is not None and session_id != self._session_id:
+            return RequestPermissionResponse(
+                outcome=DeniedOutcome(outcome="cancelled")
+            )
         request_id = uuid.uuid4().hex
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str | None] = loop.create_future()
@@ -224,6 +256,7 @@ class AcpTransport:
         self._process: Any = None
         self._session_id: str | None = None
         self._prompt_task: asyncio.Task[Any] | None = None
+        self._warmup_task: asyncio.Task[Any] | None = None
         self._stderr_fd: int | None = None
         self._stderr_path: str | None = None
         self._closed = False
@@ -262,20 +295,82 @@ class AcpTransport:
             )
         new_session = await self._conn.new_session(cwd=self._cwd)
         self._session_id = new_session.session_id
+        self._client.set_session_id(self._session_id)
+        if not _warmup_disabled():
+            self._warmup_task = asyncio.create_task(self._warm_backend())
         return Connected(
             session_id=self._session_id,
             # Prefer the agent the server actually resolved (via _meta) over
             # the one we requested, so the UI shows the real agent.
             agent=_session_agent(new_session) or self._agent,
             model=_current_model(new_session),
+            qwenpaw_version=_agent_version(initialized),
+            warming=self._warmup_task is not None,
         )
+
+    async def _warm_backend(self) -> None:
+        warm_session_id: str | None = None
+        try:
+            if self._conn is None:
+                return
+            warm_session = await self._conn.new_session(cwd=self._cwd)
+            warm_session_id = warm_session.session_id
+            if warm_session_id == self._session_id:
+                logger.debug(
+                    "skipping ACP warmup because agent reused session id %s",
+                    warm_session_id,
+                )
+                await self._queue.put(
+                    BackendWarmed(
+                        success=False,
+                        message="warmup skipped: duplicate session id",
+                    )
+                )
+                return
+            self._client.ignore_session(warm_session_id)
+            await self._conn.prompt(
+                prompt=[text_block(_WARMUP_PROMPT)],
+                session_id=warm_session_id,
+            )
+            await self._queue.put(BackendWarmed())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - warmup is best-effort
+            logger.debug("ACP warmup failed: %s", exc, exc_info=True)
+            await self._queue.put(
+                BackendWarmed(success=False, message=str(exc))
+            )
+        finally:
+            if (
+                warm_session_id is not None
+                and self._conn is not None
+                and not self._closed
+            ):
+                try:
+                    await self._conn.close_session(session_id=warm_session_id)
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "failed to close warmup session", exc_info=True
+                    )
 
     async def send(self, text: str) -> None:
         if self._conn is None or self._session_id is None:
             raise RuntimeError("transport not started")
         if self._prompt_task is not None and not self._prompt_task.done():
             raise RuntimeError("a turn is already in progress")
-        self._prompt_task = asyncio.create_task(self._run_prompt(text))
+        self._prompt_task = asyncio.create_task(
+            self._run_prompt_after_warmup(text)
+        )
+
+    async def _run_prompt_after_warmup(self, text: str) -> None:
+        if self._warmup_task is not None and not self._warmup_task.done():
+            try:
+                await self._warmup_task
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.debug("warmup task failed before prompt", exc_info=True)
+        await self._run_prompt(text)
 
     async def _run_prompt(self, text: str) -> None:
         stop_reason: str | None = None
@@ -345,6 +440,12 @@ class AcpTransport:
             return
         self._closed = True
         self._client.cancel_pending()
+        if self._warmup_task is not None and not self._warmup_task.done():
+            self._warmup_task.cancel()
+            try:
+                await self._warmup_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if self._prompt_task is not None and not self._prompt_task.done():
             self._prompt_task.cancel()
             try:
@@ -409,3 +510,10 @@ def _current_model(new_session: Any) -> str | None:
             if mid == current_id:
                 return getattr(model, "name", None) or str(mid)
     return str(current_id) if current_id else None
+
+
+def _agent_version(initialized: Any) -> str | None:
+    """Best-effort extraction of the ACP server's implementation version."""
+    info = getattr(initialized, "agent_info", None)
+    version = getattr(info, "version", None)
+    return str(version) if version else None

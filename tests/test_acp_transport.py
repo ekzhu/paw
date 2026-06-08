@@ -10,6 +10,7 @@ import sys
 import pytest
 
 from paw.events import (
+    BackendWarmed,
     Connected,
     PermissionRequest,
     TextDelta,
@@ -48,6 +49,8 @@ async def test_start_and_basic_turn():
         connected = await asyncio.wait_for(transport.start(), timeout=10.0)
         assert isinstance(connected, Connected)
         assert connected.session_id == "sess-1"
+        assert connected.qwenpaw_version == "0.0.1"
+        assert connected.warming is True
 
         await transport.send("hi there")
         events = await _collect_turn(transport)
@@ -55,6 +58,7 @@ async def test_start_and_basic_turn():
         await transport.close()
 
     assert any(isinstance(e, ThoughtDelta) for e in events)
+    assert any(isinstance(e, BackendWarmed) for e in events)
     text = "".join(e.text for e in events if isinstance(e, TextDelta))
     assert text == "Hello world"
 

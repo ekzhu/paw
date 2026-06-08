@@ -7,9 +7,11 @@ import asyncio
 
 import pytest
 
-from paw.app import PawApp
+from paw.app import PawApp, _local_commands
+from paw.__version__ import __version__
 from paw.events import (
     AvailableCommands,
+    BackendWarmed,
     Connected,
     FileLink,
     PermissionOption,
@@ -22,16 +24,21 @@ from paw.events import (
     ToolCall,
     TurnEnded,
 )
+from paw.providers import ProviderInfo
 from paw.widgets import (
+    ActivityLine,
     AgentLabel,
     AssistantMessage,
     CommandMenu,
     FileLinkBox,
     PermissionModal,
     QueuedMessage,
+    StatusBar,
     ThoughtMessage,
     ToolPanel,
     UserMessage,
+    WelcomeMessage,
+    ThemePicker,
 )
 
 
@@ -43,12 +50,16 @@ class FakeTransport:
         self.sent: list[str] = []
         self.interrupted = False
         self.resolved: list[tuple[str, str | None]] = []
+        self.models: list[str] = []
         self.closed = False
         self._permission_mode = "none"
 
     async def start(self) -> Connected:
         return Connected(
-            session_id="sess-abc", agent="default", model="qwen-max"
+            session_id="sess-abc",
+            agent="default",
+            model="qwen-max",
+            qwenpaw_version="9.8.7",
         )
 
     async def send(self, text: str) -> None:
@@ -97,12 +108,44 @@ class FakeTransport:
         await self._queue.put(TextDelta(f"[{option_id}]"))
         await self._queue.put(TurnEnded())
 
-    async def set_model(self, model_id):  # pragma: no cover
-        pass
+    async def set_model(self, model_id):
+        self.models.append(model_id)
 
     async def close(self):
         self.closed = True
         await self._queue.put(None)
+
+
+class SlowStartTransport(FakeTransport):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def start(self) -> Connected:
+        await self.release.wait()
+        return await super().start()
+
+
+class WarmingTransport(FakeTransport):
+    async def start(self) -> Connected:
+        connected = await super().start()
+        return Connected(
+            session_id=connected.session_id,
+            agent=connected.agent,
+            model=connected.model,
+            qwenpaw_version=connected.qwenpaw_version,
+            warming=True,
+        )
+
+
+class QuietTransport(FakeTransport):
+    async def send(self, text: str) -> None:
+        self.sent.append(text)
+
+
+class WarmingQuietTransport(WarmingTransport):
+    async def send(self, text: str) -> None:
+        self.sent.append(text)
 
 
 @pytest.mark.asyncio
@@ -129,6 +172,59 @@ async def test_basic_turn_renders():
         assert assistant.text == "Hello there"
         tools = list(app.query(ToolPanel))
         assert tools and tools[0]._status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_message_bubbles_are_transparent():
+    """Message bubbles blend into the background.
+
+    The background is a static colour and the bubble fills are transparent, so
+    text and bubble are consistent with the overall background; only a rounded
+    border outlines each one.
+    """
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#prompt").value = "hi"
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+            if not app._busy:
+                break
+
+        bubbles = [
+            app.query(UserMessage).first(),
+            app.query(AssistantMessage).first(),
+            app.query(AssistantMessage).first().query_one("Markdown"),
+            app.query(ToolPanel).first(),
+        ]
+        for bubble in bubbles:
+            assert bubble.styles.background.a == 0, (
+                f"{type(bubble).__name__} background is not transparent"
+            )
+
+
+@pytest.mark.asyncio
+async def test_assistant_bubble_has_no_trailing_blank_row():
+    """A single-line answer is border + one text row + border = 3 rows.
+
+    A trailing markdown paragraph margin would make it 4 (uneven bottom
+    padding); the last-child margin reset keeps top and bottom even.
+    """
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#prompt").value = "hi"
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+            if not app._busy:
+                break
+
+        assistant = app.query(AssistantMessage).first()
+        assert assistant.region.height == 3
 
 
 @pytest.mark.asyncio
@@ -225,6 +321,12 @@ async def test_toggle_hides_finished_tools_only():
         await pilot.pause()
         done = app._tools["done"]
         live = app._tools["live"]
+        assert done.has_class("hidden")
+        assert live.has_class("hidden")
+
+        await pilot.press("ctrl+i")
+        assert not done.has_class("hidden")
+        assert not live.has_class("hidden")
 
         await pilot.press("ctrl+t")
         assert done.has_class("hidden")  # finished → hidden
@@ -244,6 +346,68 @@ async def test_thinking_collapsed_by_default():
         await pilot.pause()
         thought = app.query(ThoughtMessage).first()
         assert thought.collapsed is True
+        assert thought.has_class("hidden")
+        activity = app.query(ActivityLine).first()
+        assert "thinking" in activity.content.plain
+
+
+@pytest.mark.asyncio
+async def test_new_thoughts_expand_when_inspection_mode_is_active():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+i")
+        await app._dispatch(ThoughtDelta("show the details"))
+        await pilot.pause()
+
+        thought = app.query(ThoughtMessage).first()
+        assert thought.collapsed is False
+        assert not thought.has_class("hidden")
+        assert app.query(ActivityLine).first().has_class("hidden")
+
+
+@pytest.mark.asyncio
+async def test_friendly_mode_collapses_tool_chain_to_one_activity_line():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._dispatch(ThoughtDelta("planning"))
+        await app._dispatch(
+            ToolCall(
+                "t1",
+                "read_file",
+                kind="read",
+                status="completed",
+                params="path: README.md",
+                output="...",
+            )
+        )
+        await app._dispatch(
+            ToolCall(
+                "t2",
+                "execute_shell_command",
+                kind="execute",
+                status="in_progress",
+                params="command: pytest -q",
+            )
+        )
+        await pilot.pause()
+
+        activities = list(app.query(ActivityLine))
+        assert len(activities) == 1
+        assert "execute_shell_command" in activities[0].content.plain
+        assert "pytest -q" in activities[0].content.plain
+        assert all(panel.has_class("hidden") for panel in app.query(ToolPanel))
+        assert app.query(ThoughtMessage).first().has_class("hidden")
+
+        await pilot.press("ctrl+i")
+        assert activities[0].has_class("hidden")
+        assert all(
+            not panel.has_class("hidden") for panel in app.query(ToolPanel)
+        )
+        assert not app.query(ThoughtMessage).first().has_class("hidden")
 
 
 @pytest.mark.asyncio
@@ -294,11 +458,15 @@ async def test_slash_command_suggestions():
         await pilot.pause()
         assert not menu.display
 
-        # "/" opens the dropdown with every command.
+        # "/" opens the dropdown with local commands plus agent commands.
         prompt.value = "/"
         await pilot.pause()
         assert menu.display
-        assert menu.option_count == 3
+        assert menu.option_count >= 3
+        command_names = [command.name for command in app._suggester._commands]
+        assert {"model", "agent", "clear", "theme", "voice"}.issubset(
+            command_names
+        )
 
         # Inline ghost completion offers the top match.
         assert await app._suggester.get_suggestion("/mod") == "/model"
@@ -314,6 +482,154 @@ async def test_slash_command_suggestions():
         await pilot.press("tab")
         assert prompt.value == "/agent "
         assert not menu.display
+        assert transport.sent == []
+
+
+@pytest.mark.asyncio
+async def test_slash_command_suggests_theme_arguments():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        menu = app.query_one(CommandMenu)
+        prompt = app.query_one("#prompt")
+
+        prompt.value = "/theme c"
+        await pilot.pause()
+        assert menu.display
+        assert menu.selected == "theme cyberpunk"
+
+        await pilot.press("tab")
+        assert prompt.value == "/theme cyberpunk "
+        assert transport.sent == []
+
+
+@pytest.mark.asyncio
+async def test_slash_command_suggests_provider_model_arguments():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._providers = [
+            ProviderInfo(
+                id="dashscope",
+                label="DashScope",
+                configured=True,
+                models=["qwen3-max", "qwen-plus"],
+            )
+        ]
+        app._local_commands = _local_commands(app._providers)
+        app._set_command_catalog()
+
+        menu = app.query_one(CommandMenu)
+        prompt = app.query_one("#prompt")
+        prompt.value = "/model dash"
+        await pilot.pause()
+        assert menu.display
+        assert menu.selected == "model dashscope:qwen3-max"
+
+
+@pytest.mark.asyncio
+async def test_welcome_message_mounts_with_qwenpaw_greeting():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        welcome = app.query(WelcomeMessage).first()
+        plain = welcome.content.plain
+        assert "█" in plain
+        assert "▀" not in plain
+        assert plain.count("█") > 150
+        assert "QwenPaw 9.8.7" not in plain
+        assert f"TUI {__version__}" not in plain
+        assert "works for you" not in plain
+        assert "/theme" not in plain
+        assert len(plain.splitlines()) >= 6
+        status = app.query_one(StatusBar).summary
+        assert "QwenPaw 9.8.7" in status
+        assert f"TUI {__version__}" in status
+
+
+@pytest.mark.asyncio
+async def test_status_stays_starting_until_backend_connects():
+    transport = SlowStartTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert "starting" in app.query_one(StatusBar).summary
+        assert "ready" not in app.query_one(StatusBar).summary
+
+        transport.release.set()
+        for _ in range(10):
+            await pilot.pause()
+            if "ready" in app.query_one(StatusBar).summary:
+                break
+        assert "ready" in app.query_one(StatusBar).summary
+
+
+@pytest.mark.asyncio
+async def test_status_stays_warming_until_backend_warmup_finishes():
+    transport = WarmingTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        summary = app.query_one(StatusBar).summary
+        assert "warming" in summary
+        assert "ready" not in summary
+
+        await app._dispatch(BackendWarmed())
+        summary = app.query_one(StatusBar).summary
+        assert "ready" in summary
+        assert "warming" not in summary
+
+
+@pytest.mark.asyncio
+async def test_first_turn_shows_warming_until_backend_updates():
+    transport = WarmingQuietTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app._submit("hello")
+        assert transport.sent == ["hello"]
+        summary = app.query_one(StatusBar).summary
+        assert "warming" in summary
+        assert "thinking" not in summary
+
+        await app._dispatch(TextDelta("hi"))
+        summary = app.query_one(StatusBar).summary
+        assert "thinking" in summary
+
+
+@pytest.mark.asyncio
+async def test_theme_command_opens_gallery_without_chat_turn():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        prompt = app.query_one("#prompt")
+        prompt.value = "/theme gallery"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, ThemePicker)
+        assert transport.sent == []
+        app.screen.dismiss(None)
+
+
+@pytest.mark.asyncio
+async def test_named_theme_command_applies_gallery_theme(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PAW_STATE_DIR", str(tmp_path / "state"))
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        prompt = app.query_one("#prompt")
+        prompt.value = "/theme cyberpunk"
+        await pilot.press("enter")
+        await pilot.pause()
+        saved = (tmp_path / "state" / "theme.json").read_text(encoding="utf-8")
+        assert "cyberpunk tiger-paw alley" in saved
         assert transport.sent == []
 
 
@@ -352,17 +668,25 @@ async def test_single_agent_label_per_turn_above_thinking():
 
         labels = list(app.query(AgentLabel))
         assert len(labels) == 1
+        assert labels[0].content.plain == "qwenpaw"
 
         transcript = app.query_one("#transcript")
         types = [
             type(w).__name__
             for w in transcript.children
             if isinstance(
-                w, (AgentLabel, ThoughtMessage, ToolPanel, AssistantMessage)
+                w,
+                (
+                    AgentLabel,
+                    ActivityLine,
+                    ThoughtMessage,
+                    ToolPanel,
+                    AssistantMessage,
+                ),
             )
         ]
         assert types[0] == "AgentLabel"
-        assert types[1] == "ThoughtMessage"
+        assert types[1] == "ActivityLine"
 
 
 @pytest.mark.asyncio
@@ -575,3 +899,113 @@ async def test_up_recalls_queued_message_to_edit():
         assert app._queued == []
         assert len(list(app.query(QueuedMessage))) == 0
         assert transport.sent == []
+
+
+@pytest.mark.asyncio
+async def test_multiline_prompt_sends_full_text():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        prompt = app.query_one("#prompt")
+        prompt.value = "first line\nsecond line"
+        await pilot.press("enter")
+        for _ in range(10):
+            await pilot.pause()
+            if transport.sent:
+                break
+        assert transport.sent == ["first line\nsecond line"]
+
+
+@pytest.mark.asyncio
+async def test_model_command_switches_without_chat_turn():
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        prompt = app.query_one("#prompt")
+        prompt.value = "/model dashscope:qwen-max"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert transport.models == ["dashscope:qwen-max"]
+        assert transport.sent == []
+
+
+@pytest.mark.asyncio
+async def test_long_paste_is_stored_as_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAW_STATE_DIR", str(tmp_path / "state"))
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        replacement = await app._handle_prompt_paste("x" * 2200)
+        assert replacement is not None
+        path = replacement.removeprefix("[pasted text: ").removesuffix("]")
+        assert "pasted-text" in path
+        assert open(path, encoding="utf-8").read() == "x" * 2200
+
+
+@pytest.mark.asyncio
+async def test_file_path_paste_is_copied_to_attachment(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAW_STATE_DIR", str(tmp_path / "state"))
+    source = tmp_path / "note.txt"
+    source.write_text("hello", encoding="utf-8")
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        replacement = await app._handle_prompt_paste(str(source))
+        assert replacement is not None
+        path = replacement.removeprefix("[attached file: ").removesuffix("]")
+        assert path.endswith(".txt")
+        assert open(path, encoding="utf-8").read() == "hello"
+
+
+@pytest.mark.asyncio
+async def test_embedded_escaped_file_path_paste_is_copied(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("PAW_STATE_DIR", str(tmp_path / "state"))
+    source = tmp_path / "Screenshot 2026-06-06 at 9.31.17 PM.png"
+    source.write_bytes(b"png")
+    escaped = str(source).replace(" ", "\\ ")
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        replacement = await app._handle_prompt_paste(
+            f"Can you describe this image? {escaped}"
+        )
+        assert replacement is not None
+        assert replacement.startswith("Can you describe this image? ")
+        assert str(source) not in replacement
+        assert escaped not in replacement
+        path = replacement.rsplit("[attached file: ", 1)[1].removesuffix("]")
+        assert path.endswith(".png")
+        assert open(path, "rb").read() == b"png"
+
+
+@pytest.mark.asyncio
+async def test_voice_command_inserts_transcript(monkeypatch):
+    monkeypatch.setenv("PAW_VOICE_COMMAND", "printf hello")
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await app.action_voice_input()
+        await pilot.pause()
+        assert app.query_one("#prompt").value == "hello"
+
+
+@pytest.mark.asyncio
+async def test_theme_prompt_persists(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAW_STATE_DIR", str(tmp_path / "state"))
+    transport = FakeTransport()
+    app = PawApp(transport)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._apply_theme_prompt("rainbow workspace")
+        await pilot.pause()
+        assert "rainbow workspace" in (
+            tmp_path / "state" / "theme.json"
+        ).read_text(encoding="utf-8")

@@ -41,6 +41,7 @@ class FakeAgent(Agent):
     def __init__(self) -> None:
         self._conn = None
         self._cancel: dict[str, asyncio.Event] = {}
+        self._session_count = 0
 
     def on_connect(self, conn) -> None:  # noqa: ANN001
         self._conn = conn
@@ -61,7 +62,8 @@ class FakeAgent(Agent):
     async def new_session(
         self, cwd, additional_directories=None, mcp_servers=None, **kw
     ):  # noqa: ANN001
-        return NewSessionResponse(session_id="sess-1")
+        self._session_count += 1
+        return NewSessionResponse(session_id=f"sess-{self._session_count}")
 
     async def cancel(self, session_id, **kw):  # noqa: ANN001
         ev = self._cancel.get(session_id)

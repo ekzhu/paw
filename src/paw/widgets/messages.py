@@ -13,17 +13,30 @@ from textual.widgets import Collapsible, Markdown, Static
 from ._anim import TICK, pulse, spinner
 
 
-class UserMessage(Static):
+class _Bubble(Static):
+    """A rounded message card.
+
+    The fill is transparent so the bubble blends into the static background; a
+    rounded border outlines it. The background no longer animates, so
+    transparency is safe — there is nothing to re-blend against each frame, and
+    the rounded corners simply show the background.
+    """
+
+    def __init__(self, renderable, *, classes: str = "") -> None:
+        super().__init__(renderable, classes=f"msg {classes}".strip())
+
+
+class UserMessage(_Bubble):
     """A user turn, shown with a prompt glyph."""
 
     def __init__(self, text: str) -> None:
         body = Text()
         body.append("❯ ", style="bold #6db8ff")
         body.append(text)
-        super().__init__(body, classes="msg user")
+        super().__init__(body, classes="user")
 
 
-class QueuedMessage(Static):
+class QueuedMessage(_Bubble):
     """A user message waiting its turn while the agent is still working.
 
     Sent while busy, it sits dimmed in the transcript until the current turn
@@ -34,7 +47,7 @@ class QueuedMessage(Static):
         body = Text()
         body.append("⏳ ", style="#8a8a8a")
         body.append(text, style="#8a8a8a")
-        super().__init__(body, classes="msg queued")
+        super().__init__(body, classes="queued")
 
 
 class AgentLabel(Static):
@@ -47,8 +60,194 @@ class AgentLabel(Static):
 
     def __init__(self) -> None:
         super().__init__(
-            Text("qwenpaw", style="bold #b48cff"), classes="agentlabel"
+            Text("qwenpaw", style="bold #b48cff"),
+            classes="agentlabel",
         )
+
+
+class WelcomeMessage(Static):
+    """Animated startup greeting rendered as terminal pixels."""
+
+    _LOGO_PIXELS = (
+        " ███████                              ████████    O O O",
+        "███   ███ ███   ███  ██████  ███████  ███   ███  ███████  ███   ███",
+        "███   ███ ███   ███ ███  ███ ███  ███ ███   ███ ███   ███ ███   ███",
+        "███   ███ ███ █ ███ ████████ ███  ███ █████████ ███   ███ ███ █ ███",
+        "███ █ ███ █████████ ███      ███  ███ ███       ███   ███ █████████",
+        " ███████   ███ ███   ██████  ███  ███ ███        █████ ██  ███ ███",
+        "     ████",
+    )
+    def __init__(
+        self, palette: tuple[str, str, str] | None = None
+    ) -> None:
+        self._frame = 0
+        self._timer = None
+        self._gradient_stops = (
+            "#bfe1ff",
+            "#8fd7ff",
+            "#c8b6ff",
+            "#ffd08a",
+        )
+        if palette is not None:
+            self._set_palette_colors(palette)
+        super().__init__(
+            self._render_body(), classes="msg welcome"
+        )
+
+    def on_mount(self) -> None:
+        self._timer = self.set_interval(0.32, self._tick)
+
+    def on_unmount(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+
+    def _tick(self) -> None:
+        self._frame += 1
+        self.update(self._render_body())
+
+    def set_palette(self, palette: tuple[str, str, str]) -> None:
+        self._set_palette_colors(palette)
+        self.update(self._render_body())
+
+    def _set_palette_colors(self, palette: tuple[str, str, str]) -> None:
+        screen, prompt_bg, chrome = palette
+        cool = _mix_hex(chrome, "#ffffff", 0.62)
+        warm = _mix_hex(prompt_bg, "#ffd08a", 0.46)
+        bright = _mix_hex(prompt_bg, "#ffffff", 0.56)
+        deep = _mix_hex(screen, chrome, 0.52)
+        self._gradient_stops = (
+            bright,
+            cool,
+            _mix_hex(cool, warm, 0.42),
+            _mix_hex(deep, "#ffffff", 0.48),
+        )
+
+    def _render_body(self) -> Text:
+        body = Text()
+        for row in self._render_pixel_rows():
+            body.append(row)
+        return body
+
+    def _render_pixel_rows(self) -> list[Text]:
+        rows: list[Text] = []
+        cells = self._shaded_cells()
+        for index, row_cells in enumerate(cells):
+            line = Text()
+            base = self._gradient_color(index)
+            for kind in row_cells:
+                if kind == "space":
+                    line.append(" ")
+                elif kind == "dot":
+                    line.append("█", style=_bright_dot_hex(base))
+                elif kind == "hi":
+                    # Top / left edge catches the light.
+                    line.append("█", style=_mix_hex(base, "#ffffff", 0.34))
+                elif kind == "sh":
+                    # Bottom / right edge falls into shadow.
+                    line.append("█", style=_mix_hex(base, "#0a1018", 0.55))
+                else:
+                    line.append("█", style=base)
+            rows.append(line)
+            if index + 1 < len(cells):
+                line.append("\n")
+        return rows
+
+    def _shaded_cells(self) -> list[list[str]]:
+        """Classify every logo cell for bevelled (embossed) shading.
+
+        The shade is derived from each block's neighbours: a block exposed at
+        the top/left reads as a highlight, one exposed at the bottom/right as a
+        shadow, and a fully enclosed block as the base tone. Doing it from the
+        geometry shades every letter the same way, so the whole word is
+        consistently 3-D without hand-drawing each one. Cached, since the shape
+        never changes (only the animated gradient colour does).
+        """
+        cached = getattr(self, "_cells_cache", None)
+        if cached is not None:
+            return cached
+        grid = self._LOGO_PIXELS
+
+        def solid(r: int, c: int) -> bool:
+            return (
+                0 <= r < len(grid)
+                and 0 <= c < len(grid[r])
+                and grid[r][c] in "█O"
+            )
+
+        cells: list[list[str]] = []
+        for r, row in enumerate(grid):
+            row_cells: list[str] = []
+            for c, ch in enumerate(row):
+                if ch == " ":
+                    row_cells.append("space")
+                elif ch == "O":
+                    row_cells.append("dot")
+                else:
+                    score = (
+                        (not solid(r - 1, c))
+                        + (not solid(r, c - 1))
+                        - (not solid(r + 1, c))
+                        - (not solid(r, c + 1))
+                    )
+                    row_cells.append(
+                        "hi" if score > 0 else "sh" if score < 0 else "base"
+                    )
+            cells.append(row_cells)
+        self._cells_cache = cells
+        return cells
+
+    def _gradient_color(self, row_index: int) -> str:
+        stops = self._gradient_stops
+        position = (row_index * 0.72 + self._frame * 0.26) % len(stops)
+        start = int(position)
+        amount = position - start
+        return _mix_hex(stops[start], stops[(start + 1) % len(stops)], amount)
+
+
+def _mix_hex(left: str, right: str, amount: float) -> str:
+    left_rgb = _hex_to_rgb(left)
+    right_rgb = _hex_to_rgb(right)
+    mixed = tuple(
+        round(a + (b - a) * amount)
+        for a, b in zip(left_rgb, right_rgb, strict=True)
+    )
+    return "#{:02x}{:02x}{:02x}".format(*mixed)
+
+
+def _hex_to_rgb(value: str) -> tuple[int, int, int]:
+    cleaned = value.removeprefix("#")
+    return (
+        int(cleaned[0:2], 16),
+        int(cleaned[2:4], 16),
+        int(cleaned[4:6], 16),
+    )
+
+
+def _bright_dot_hex(color: str) -> str:
+    bright = _mix_hex(color, "#ffffff", 0.82)
+    if _relative_luminance(bright) <= _relative_luminance(color):
+        return "#ffffff"
+    return bright
+
+
+def _contrast_ratio(left: str, right: str) -> float:
+    left_luminance = _relative_luminance(left)
+    right_luminance = _relative_luminance(right)
+    lighter = max(left_luminance, right_luminance)
+    darker = min(left_luminance, right_luminance)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _relative_luminance(color: str) -> float:
+    channels = []
+    for channel in _hex_to_rgb(color):
+        value = channel / 255
+        if value <= 0.03928:
+            channels.append(value / 12.92)
+        else:
+            channels.append(((value + 0.055) / 1.055) ** 2.4)
+    red, green, blue = channels
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
 
 
 class AssistantMessage(Widget):
@@ -148,7 +347,101 @@ class ThoughtMessage(Collapsible):
         self._body.update(Text(self._text, style="italic #8a8a8a"))
 
 
-class FileLinkBox(Static):
+class ActivityLine(_Bubble):
+    """Single friendly row for the current hidden thought/tool chain."""
+
+    _TERMINAL = {"completed", "failed"}
+
+    def __init__(self) -> None:
+        self._mode = "thinking"
+        self._label = "thinking"
+        self._status = "in_progress"
+        self._summary = ""
+        self._frame = 0
+        self._timer = None
+        self._start = time.monotonic()
+        super().__init__(self._render_line(), classes="activity")
+
+    def on_mount(self) -> None:
+        self._timer = self.set_interval(TICK, self._tick)
+
+    def on_unmount(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+
+    def _tick(self) -> None:
+        if self._status in self._TERMINAL:
+            return
+        self._frame += 1
+        self.update(self._render_line())
+
+    def set_thinking(self) -> None:
+        self._mode = "thinking"
+        self._label = "thinking"
+        self._status = "in_progress"
+        self._summary = ""
+        self.update(self._render_line())
+
+    def set_tool(
+        self,
+        *,
+        title: str | None = None,
+        kind: str | None = None,
+        status: str | None = None,
+        params: str | None = None,
+    ) -> None:
+        self._mode = "tool"
+        if title or kind:
+            self._label = self._tool_label(title, kind)
+        self._status = status or self._status
+        if params is not None:
+            self._summary = self._tool_summary(params)
+        self.update(self._render_line())
+
+    def done(self) -> None:
+        if self._status not in self._TERMINAL:
+            self._status = "completed"
+        if self._mode == "thinking":
+            self._label = "thought complete"
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+        self.update(self._render_line())
+
+    def _render_line(self) -> Text:
+        text = Text()
+        if self._status in self._TERMINAL:
+            glyph = "✓" if self._status == "completed" else "✗"
+            color = "#6dff9d" if self._status == "completed" else "#ff6d6d"
+        else:
+            glyph = spinner(self._frame)
+            color = pulse(self._frame)
+        text.append(f"{glyph} ", style=f"bold {color}")
+        if self._mode == "tool":
+            text.append("using ", style="#8a8a8a")
+            text.append(self._label, style="bold")
+        else:
+            elapsed = int(time.monotonic() - self._start)
+            text.append(f"{self._label} {elapsed}s", style="italic #8a8a8a")
+        if self._summary:
+            text.append("  ")
+            text.append(self._summary, style="#7fb7d9")
+        return text
+
+    def _tool_label(self, title: str | None, kind: str | None) -> str:
+        value = (title or "").strip()
+        if value and value.lower() != "tool":
+            return value
+        return kind or "tool"
+
+    def _tool_summary(self, params: str | None) -> str:
+        if not params:
+            return ""
+        first = params.strip().splitlines()[0].strip()
+        return first[:72] + " ..." if len(first) > 72 else first
+
+
+class FileLinkBox(_Bubble):
     """A file the agent sent (e.g. via ``send_file_to_user``).
 
     Rendered as a distinct, always-visible transcript line (the originating
@@ -157,7 +450,6 @@ class FileLinkBox(Static):
     """
 
     DEFAULT_CSS = """
-    FileLinkBox { height: auto; }
     FileLinkBox:hover { background: #23233a; }
     """
 
@@ -167,7 +459,7 @@ class FileLinkBox(Static):
         body.append("📎 ", style="bold #6db8ff")
         body.append(name or uri, style="underline #6db8ff")
         body.append("  (click to open)", style="#5a5a5a")
-        super().__init__(body, classes="msg file")
+        super().__init__(body, classes="file")
 
     def on_click(self) -> None:
         try:
@@ -176,21 +468,36 @@ class FileLinkBox(Static):
             pass
 
 
-class PushMessageBox(Static):
+class PushMessageBox(_Bubble):
     """A server-initiated proactive message."""
 
     def __init__(self, text: str) -> None:
         body = Text()
         body.append("✦ ", style="bold #ffcf6d")
         body.append(text, style="#ffcf6d")
-        super().__init__(body, classes="msg push")
+        super().__init__(body, classes="push")
 
 
-class ErrorMessage(Static):
+class InfoMessage(_Bubble):
+    """A friendly local UI notice."""
+
+    def __init__(self, text: str, *, level: str = "info") -> None:
+        marker, color = {
+            "info": ("•", "#8fd3ff"),
+            "ok": ("✓", "#6dff9d"),
+            "warn": ("!", "#ffcf6d"),
+        }.get(level, ("•", "#8fd3ff"))
+        body = Text()
+        body.append(f"{marker} ", style=f"bold {color}")
+        body.append(text, style=color)
+        super().__init__(body, classes=f"info {level}")
+
+
+class ErrorMessage(_Bubble):
     """A transport/agent error."""
 
     def __init__(self, text: str) -> None:
         body = Text()
         body.append("⚠ ", style="bold #ff6d6d")
         body.append(text, style="#ff9d9d")
-        super().__init__(body, classes="msg error")
+        super().__init__(body, classes="error")

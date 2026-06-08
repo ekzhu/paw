@@ -5,31 +5,42 @@ from __future__ import annotations
 
 from .command_menu import CommandMenu, CommandSuggester, PromptInput
 from .messages import (
+    ActivityLine,
     AgentLabel,
     AssistantMessage,
     ErrorMessage,
     FileLinkBox,
+    InfoMessage,
     PushMessageBox,
     QueuedMessage,
     ThoughtMessage,
+    WelcomeMessage,
     UserMessage,
 )
+from .model_picker import ModelPicker, ProviderSetup
 from .permission_modal import PermissionModal
 from .status_bar import StatusBar
+from .theme_picker import ThemePicker
 from .tool_panel import ToolPanel
 
 __all__ = [
     "AgentLabel",
+    "ActivityLine",
     "AssistantMessage",
     "CommandMenu",
     "CommandSuggester",
     "PromptInput",
     "ErrorMessage",
     "FileLinkBox",
+    "InfoMessage",
+    "ModelPicker",
     "PushMessageBox",
+    "ProviderSetup",
     "QueuedMessage",
+    "ThemePicker",
     "ThoughtMessage",
     "UserMessage",
+    "WelcomeMessage",
     "PermissionModal",
     "StatusBar",
     "ToolPanel",

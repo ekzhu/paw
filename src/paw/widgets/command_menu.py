@@ -4,7 +4,7 @@ filtered dropdown list.
 
 The agent advertises its commands over ACP (``available_commands_update``);
 :class:`CommandSuggester` drives the single inline ghost completion on the
-``Input`` and :class:`CommandMenu` renders the navigable dropdown. Both share
+``TextArea`` and :class:`CommandMenu` renders the navigable dropdown. Both share
 the same command list, set via :meth:`set_commands`.
 """
 
@@ -13,7 +13,7 @@ from __future__ import annotations
 from rich.text import Text
 from textual import events
 from textual.suggester import Suggester
-from textual.widgets import Input, OptionList
+from textual.widgets import OptionList, TextArea
 from textual.widgets.option_list import Option
 
 from ..events import SlashCommand
@@ -22,17 +22,22 @@ from ..events import SlashCommand
 def _query(value: str) -> str | None:
     """The command prefix being typed, or ``None`` if not applicable.
 
-    Active only while the input is a single ``/token`` with no space yet —
-    once an argument is started (``/model x``) the command is chosen and
-    suggestions step out of the way.
+    The menu suggests whole slash-command lines, not only command names, so
+    arguments can be completed too (``/theme cy`` → ``/theme cyberpunk``).
     """
-    if not value.startswith("/") or " " in value:
+    if not value.startswith("/"):
         return None
-    return value[1:]
+    return value[1:].lstrip()
 
 
 def _matches(commands: list[SlashCommand], query: str) -> list[SlashCommand]:
     q = query.lower()
+    if " " not in q:
+        return [
+            c
+            for c in commands
+            if " " not in c.name and c.name.lower().startswith(q)
+        ]
     return [c for c in commands if c.name.lower().startswith(q)]
 
 
@@ -57,7 +62,7 @@ class CommandSuggester(Suggester):
 class CommandMenu(OptionList):
     """Dropdown of matching commands, navigated from the focused input.
 
-    Focus stays on the ``Input``; the owning app routes ↑/↓/⏎/⇥/esc here
+    Focus stays on the ``TextArea``; the owning app routes ↑/↓/⏎/⇥/esc here
     via :meth:`cursor_up`, :meth:`cursor_down` and :attr:`selected`.
     """
 
@@ -66,16 +71,17 @@ class CommandMenu(OptionList):
 
     DEFAULT_CSS = """
     CommandMenu {
+        layer: overlay;
         dock: bottom;
         height: auto;
-        max-height: 8;
-        margin: 0 0 3 0;
-        border: round #3a3a4a;
-        background: #1c1c28;
+        max-height: 9;
+        margin: 0 2 4 2;
+        border: round #ff7ad9;
+        background: #101827 92%;
         display: none;
     }
     CommandMenu > .option-list--option-highlighted {
-        background: #2a2a3a;
+        background: #2b1741;
     }
     """
 
@@ -90,6 +96,11 @@ class CommandMenu(OptionList):
         """Refilter and show/hide the dropdown for the current input."""
         query = _query(value)
         hits = _matches(self._commands, query) if query is not None else []
+        if query is not None and " " in query:
+            normalized = query.rstrip().lower()
+            if any(cmd.name.lower() == normalized for cmd in hits):
+                self.display = False
+                return
         if not hits:
             self.display = False
             return
@@ -117,10 +128,10 @@ class CommandMenu(OptionList):
         self.action_cursor_down()
 
 
-class PromptInput(Input):
+class PromptInput(TextArea):
     """The chat input, wired to drive an open :class:`CommandMenu`.
 
-    ``on_key`` runs before ``Input``'s own bindings, so intercepting the
+    ``_on_key`` runs before ``TextArea``'s own bindings, so intercepting the
     navigation keys here (and stopping them) keeps ⏎/⇥/↑/↓/esc from reaching
     submit, focus-change or interrupt while the dropdown is open.
     """
@@ -128,24 +139,103 @@ class PromptInput(Input):
     def __init__(self, menu: CommandMenu, **kwargs) -> None:
         super().__init__(**kwargs)
         self._menu = menu
+        self._ignore_change_events = 0
+        self._suppress_paste_tail = ""
 
-    def on_key(self, event: events.Key) -> None:
-        if not self._menu.display:
+    @property
+    def value(self) -> str:
+        return self.text
+
+    @value.setter
+    def value(self, text: str) -> None:
+        self.text = text
+
+    def set_programmatic_value(
+        self, text: str, *, cursor_end: bool = False
+    ) -> None:
+        self._ignore_change_events += 1
+        self.text = text
+        if cursor_end:
+            self.move_cursor(self.document.end)
+
+    def consume_programmatic_change(self) -> bool:
+        if self._ignore_change_events <= 0:
+            return False
+        self._ignore_change_events -= 1
+        return True
+
+    async def _on_key(self, event: events.Key) -> None:
+        if self._consume_suppressed_paste_tail(event):
             return
-        if event.key == "down":
-            self._menu.cursor_down()
-        elif event.key == "up":
-            self._menu.cursor_up()
-        elif event.key == "escape":
-            self._menu.display = False
-        elif event.key in ("enter", "tab"):
-            name = self._menu.selected
-            if name is None:
+        if self._menu.display:
+            if event.key == "down":
+                self._menu.cursor_down()
+            elif event.key == "up":
+                self._menu.cursor_up()
+            elif event.key == "escape":
+                self._menu.display = False
+            elif event.key in ("enter", "tab"):
+                name = self._menu.selected
+                if name is None:
+                    return
+                self.set_programmatic_value(f"/{name} ", cursor_end=True)
+                self._menu.display = False
+            else:
+                await super()._on_key(event)
                 return
-            self.value = f"/{name} "
-            self.cursor_position = len(self.value)
-            self._menu.display = False
-        else:
+            event.prevent_default()
+            event.stop()
             return
-        event.prevent_default()
+
+        app = self.app
+        if event.key == "up" and not self.value:
+            event.prevent_default()
+            event.stop()
+            await app.action_recall_queued()
+            return
+        if event.key == "enter":
+            event.prevent_default()
+            event.stop()
+            await app._submit_prompt()
+            return
+        if event.key in {"shift+enter", "ctrl+j"}:
+            event.prevent_default()
+            event.stop()
+            self.insert("\n")
+            return
+        await super()._on_key(event)
+
+    async def _on_paste(self, event: events.Paste) -> None:
+        app = self.app
+        handler = getattr(app, "_handle_prompt_paste", None)
+        if handler is None:
+            await super()._on_paste(event)
+            return
         event.stop()
+        event.prevent_default()
+        replacement = await handler(event.text)
+        if replacement is None:
+            if result := self._replace_via_keyboard(
+                event.text, *self.selection
+            ):
+                self.move_cursor(result.end_location)
+                self.focus()
+            return
+        self._suppress_paste_tail = event.text
+        if result := self._replace_via_keyboard(replacement, *self.selection):
+            self.move_cursor(result.end_location)
+            self.focus()
+
+    def _consume_suppressed_paste_tail(self, event: events.Key) -> bool:
+        if not self._suppress_paste_tail:
+            return False
+        character = getattr(event, "character", None)
+        if character and self._suppress_paste_tail.startswith(character):
+            self._suppress_paste_tail = self._suppress_paste_tail[
+                len(character) :
+            ]
+            event.stop()
+            event.prevent_default()
+            return True
+        self._suppress_paste_tail = ""
+        return False

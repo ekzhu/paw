@@ -27,3 +27,7 @@ coverage.xml
 # Runtime logs (created when an agent runs with cwd here)
 logs/
 *.log
+
+# Local dev/runtime artifacts
+.devdata/
+.harness-arena/

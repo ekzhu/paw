@@ -6,6 +6,8 @@ from __future__ import annotations
 from rich.text import Text
 from textual.widgets import Static
 
+from ._anim import TICK, pulse, spinner
+
 # Public field name -> internal attribute. Internal names are namespaced with
 # ``_sb_`` so they never clash with Textual ``Widget`` internals (``_size``,
 # ``size``, ``region`` ...).
@@ -19,6 +21,8 @@ _FIELDS = (
     "tok_out",
     "tok_out_approx",
     "state",
+    "qwenpaw_version",
+    "tui_version",
 )
 
 
@@ -38,7 +42,9 @@ def _fmt_count(n: int) -> str:
 class StatusBar(Static):
     """A one-line header rendered from a few fields via :meth:`set`."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, tui_version: str = "—") -> None:
+        self._frame = 0
+        self._timer = None
         self._sb_agent = "default"
         self._sb_model = "—"
         self._sb_session = "—"
@@ -47,9 +53,28 @@ class StatusBar(Static):
         self._sb_tok_in = 0
         self._sb_tok_out = 0
         self._sb_tok_out_approx = False
-        self._sb_state = "connecting"
+        self._sb_state = "starting"
+        self._sb_qwenpaw_version = "—"
+        self._sb_tui_version = tui_version
         # Pass an initial renderable so the first arrange has a valid visual.
         super().__init__(self._compose_line(), classes="statusbar")
+
+    def on_mount(self) -> None:
+        self._timer = self.set_interval(TICK, self._tick)
+
+    def _tick(self) -> None:
+        if self._sb_state not in {
+            "connecting",
+            "starting",
+            "warming",
+            "waiting",
+            "thinking",
+            "listening",
+            "interrupting",
+        }:
+            return
+        self._frame += 1
+        self.update(self._compose_line())
 
     def set(self, **kwargs: object) -> None:
         for key, value in kwargs.items():
@@ -68,8 +93,12 @@ class StatusBar(Static):
     def _compose_line(self) -> Text:
         state_color = {
             "connecting": "#ffcf6d",
+            "starting": "#ffcf6d",
+            "warming": "#ffcf6d",
+            "waiting": "#ffcf6d",
             "ready": "#6dff9d",
             "thinking": "#6db8ff",
+            "listening": "#ff9df0",
             "interrupting": "#ffcf6d",
             "error": "#ff6d6d",
         }.get(self._sb_state, "#8a8a8a")
@@ -102,6 +131,33 @@ class StatusBar(Static):
                     f" ↓{approx}{_fmt_count(self._sb_tok_out)}",
                     style="#6dff9d",
                 )
+        if self._sb_state in {
+            "connecting",
+            "starting",
+            "warming",
+            "waiting",
+            "thinking",
+            "listening",
+            "interrupting",
+        }:
+            glyph = spinner(self._frame)
+            state_color = pulse(self._frame)
+        elif self._sb_state == "error":
+            glyph = "✗"
+        else:
+            glyph = "●"
         line.append("   ", style="")
-        line.append(f"⏺ {self._sb_state}", style=f"bold {state_color}")
+        line.append(f"{glyph} {self._sb_state}", style=f"bold {state_color}")
+        right = Text()
+        right.append(
+            f"QwenPaw {self._sb_qwenpaw_version}",
+            style="#8a8a8a",
+        )
+        right.append("   ", style="")
+        right.append(f"TUI {self._sb_tui_version}", style="#8a8a8a")
+        mounted = getattr(self, "_is_mounted", False)
+        width = self.size.width if mounted else 0
+        gap = max(3, width - line.cell_len - right.cell_len)
+        line.append(" " * gap)
+        line.append(right)
         return line

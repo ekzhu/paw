@@ -42,6 +42,9 @@ packages = { find = { where = ["src"] } }
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: tests that exercise real external services or local dev checkouts",
+]
 
 [tool.black]
 line-length = 79

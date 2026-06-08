@@ -18,6 +18,16 @@ class Connected:
     session_id: str
     agent: str | None = None
     model: str | None = None
+    qwenpaw_version: str | None = None
+    warming: bool = False
+
+
+@dataclass(frozen=True)
+class BackendWarmed:
+    """The backend completed its proactive first-turn warmup."""
+
+    success: bool = True
+    message: str | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +171,7 @@ class TransportError:
 # The normalized union the UI consumes.
 TuiEvent = (
     Connected
+    | BackendWarmed
     | SessionTitle
     | TextDelta
     | ThoughtDelta

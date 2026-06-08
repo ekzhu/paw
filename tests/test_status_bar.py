@@ -24,6 +24,21 @@ def test_token_counts_rendered_compactly():
     assert "~" not in summary  # exact, not an estimate
 
 
+def test_initial_state_is_starting_not_ready():
+    bar = StatusBar()
+    summary = bar.summary
+    assert "starting" in summary
+    assert "ready" not in summary
+
+
+def test_versions_render_in_status_bar():
+    bar = StatusBar(tui_version="0.1.0")
+    bar.set(qwenpaw_version="1.1.10")
+    summary = bar.summary
+    assert "QwenPaw 1.1.10" in summary
+    assert "TUI 0.1.0" in summary
+
+
 def test_estimate_is_marked_with_tilde():
     bar = StatusBar()
     bar.set(tok_in=1200, tok_out=512, tok_out_approx=True)
@@ -38,3 +53,10 @@ def test_input_not_shown_as_zero_during_first_stream():
     summary = bar.summary
     assert "↓~10" in summary
     assert "↑" not in summary
+
+
+def test_active_state_uses_spinner_glyph():
+    bar = StatusBar()
+    bar.set(state="thinking")
+    assert "thinking" in bar.summary
+    assert "● thinking" not in bar.summary
